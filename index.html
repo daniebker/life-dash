@@ -56,6 +56,7 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body {
   background: var(--bg); color: var(--ink); font: 14px/1.5 var(--f-body);
@@ -148,6 +149,27 @@ header.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; j
 .hm td.stat { font: 11px var(--f-mono); color: var(--ink-2); padding-left: 8px; white-space: nowrap; text-align: right; }
 .hm td.cell.hit { box-shadow: inset 0 0 0 1.5px var(--ink); }
 
+/* server mode */
+.ghost { border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 5px 12px; cursor: pointer; font-size: 13px; color: var(--ink); }
+.ghost:hover { border-color: var(--axis); }
+.ghost:disabled { opacity: .55; cursor: default; }
+.ghost.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+:root[data-theme="dark"] .ghost.primary { color: #0d1016; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .ghost.primary { color: #0d1016; } }
+.head-right { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
+.account { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--ink-2); }
+.msg { font-size: 13px; color: var(--ink-2); flex-basis: 100%; }
+.msg.err { color: var(--neg); }
+.msg.ok { color: var(--good-ink); }
+.login { max-width: 360px; margin: 12vh auto 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; display: grid; gap: 14px; }
+.login label { display: grid; gap: 4px; font-size: 13px; color: var(--ink-2); }
+.login input { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; }
+.login input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.login .ghost.primary { padding: 9px 12px; }
+.octl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.octl .state { font-size: 12px; color: var(--ink-2); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; background: var(--neu); }
+.dot.on { background: var(--good-ink); } .dot.warn { background: var(--neg); }
 /* oura */
 .ochart { position: relative; }
 .ochart svg { display: block; width: 100%; overflow: visible; }
@@ -186,25 +208,36 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
 </style>
 </head>
 <body>
-<div class="wrap">
+<form class="login" id="login" hidden>
+  <div><div class="eyebrow">Life Dash</div><h1>Sign in</h1></div>
+  <label for="lUser">Username<input id="lUser" name="username" autocomplete="username" required></label>
+  <label for="lPass">Password<input id="lPass" name="password" type="password" autocomplete="current-password" required></label>
+  <button class="ghost primary" type="submit" id="lBtn">Sign in</button>
+  <div class="msg err" id="lMsg" role="alert"></div>
+</form>
+<div class="wrap" id="app">
   <header class="top">
     <div>
       <div class="eyebrow" id="spanLabel">No data loaded</div>
       <h1>Life Dash</h1>
     </div>
+    <div class="head-right">
+    <div class="account" id="account" hidden><span id="whoami"></span><button type="button" class="ghost" id="logout">Sign out</button></div>
     <div class="seg" role="group" aria-label="Date range" id="range">
       <button type="button" data-r="7">7 days</button>
       <button type="button" data-r="14">14 days</button>
       <button type="button" data-r="30">30 days</button>
       <button type="button" data-r="0" aria-pressed="true">All</button>
     </div>
+    </div>
   </header>
 
   <div class="drop" id="drop">
     <label class="btn" for="file">Add data files</label>
     <input id="file" type="file" multiple accept=".csv,.txt,.dat,.json,text/csv,text/plain,application/octet-stream">
-    <span class="sub">or drop them here. Time log (.csv), check-ins (.csv), habits (.dat), activity list (.txt) and Oura data (.json) are detected automatically. Files stay in this browser.</span>
+    <span class="sub">or drop them here. Time log (.csv), check-ins (.csv), habits (.dat), activity list (.txt) and Oura data (.json) are detected automatically. <span id="storeNote">Files stay in this browser.</span></span>
     <div class="chips" id="chips"></div>
+    <div class="msg" id="upMsg" role="status"></div>
   </div>
 
   <section class="kpis" id="kpis"></section>
@@ -231,6 +264,7 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
 
   <section class="panel">
     <div class="panel-head"><h2>Oura</h2><span class="sub" id="ouraSub"></span></div>
+    <div class="octl" id="ouraCtl" hidden></div>
     <div id="oura"></div>
   </section>
 
@@ -260,6 +294,7 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
 </div>
 <div id="tip" hidden></div>
 
+<script src="parsers.js"></script>
 <script>
 "use strict";
 /* ---------- config ---------- */
@@ -281,14 +316,7 @@ const STORE_KEY = "lifedash.files.v1";
 /* ---------- utils ---------- */
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-// naive local time: seconds since epoch treating wall-clock time as UTC
-function naive(s) {
-  const m = /^(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d)(?::(\d\d))?/.exec(s.trim());
-  if (!m) return NaN;
-  return Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)) / 1000;
-}
 const dayStart = t => Math.floor(t / DAY) * DAY;
-const dkey = t => new Date(t * 1000).toISOString().slice(0, 10);
 const fmtDay = t => new Date(t * 1000).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", timeZone: "UTC" });
 const fmtDate = t => new Date(t * 1000).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 const fmtClock = t => new Date(t * 1000).toISOString().slice(11, 16);
@@ -299,91 +327,11 @@ const cssv = v => `var(${v})`;
 function b64enc(buf) { let s = ""; const b = new Uint8Array(buf); for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s); }
 function b64dec(str) { const s = atob(str); const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b.buffer; }
 
-/* ---------- format detection & parsers ---------- */
-function detect(name, buf) {
-  const head = new Uint8Array(buf.slice(0, 4));
-  if (String.fromCharCode(...head) === "HBT1") return "habits";
-  const text = new TextDecoder().decode(buf.slice(0, 2000));
-  if (/^\s*[{[]/.test(text)) {
-    try { const j = JSON.parse(new TextDecoder().decode(buf)); if (ouraCollections(j)) return "oura"; } catch (e) { /* not JSON */ }
-    return null;
-  }
-  if (/^\s*start_ts\s*,\s*end_ts/i.test(text) || /start\s*,\s*end\s*,\s*activity/i.test(text)) return "log";
-  if (/^\d{4}-\d\d-\d\d \d\d:\d\d,[A-Za-z]/m.test(text)) return "checkins";
-  if (!/,/.test(text) && /^[\w &/-]+$/m.test(text)) return "activities";
-  return null;
-}
-function parseCSVLine(line) {
-  const out = []; let cur = "", q = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (q) { if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') q = false; else cur += c; }
-    else if (c === '"') q = true; else if (c === ",") { out.push(cur); cur = ""; } else cur += c;
-  }
-  out.push(cur); return out;
-}
-function parseLog(text) {
-  const lines = text.split(/\r?\n/).filter(l => l.trim());
-  const hdr = parseCSVLine(lines.shift()).map(h => h.trim().toLowerCase());
-  const ix = k => hdr.indexOf(k);
-  const rows = [];
-  for (const l of lines) {
-    const c = parseCSVLine(l);
-    let s = ix("start") >= 0 ? naive(c[ix("start")]) : NaN;
-    let e = ix("end") >= 0 ? naive(c[ix("end")]) : NaN;
-    if (isNaN(s) && ix("start_ts") >= 0) { const tz = -new Date().getTimezoneOffset() * 60; s = +c[ix("start_ts")] + tz; e = +c[ix("end_ts")] + tz; }
-    const act = (c[ix("activity")] || "Other").trim();
-    if (!isNaN(s) && !isNaN(e) && e > s) rows.push({ s, e, act, id: c[ix("start_ts")] || s });
-  }
-  return rows;
-}
-function parseCheckins(text) {
-  return text.split(/\r?\n/).filter(l => l.trim()).map(l => {
-    const c = parseCSVLine(l); const t = naive(c[0]);
-    return isNaN(t) ? null : { t, core: (c[1] || "").trim(), mid: (c[2] || "").trim(), leaf: (c[3] || "").trim() };
-  }).filter(Boolean);
-}
-/* habits.dat (HBT1): header = magic[4] u16 version, u16 recordSize, u32 count.
-   record = name[24] (NUL padded), u16 daily target @24, then one byte per day-of-year where day d sits at offset 26+d.
-   Bytes 26..29 hold a 4-byte field (id/checksum), so Jan 1-4 are not read. */
-function parseHabits(buf, year) {
-  const dv = new DataView(buf), bytes = new Uint8Array(buf);
-  const rs = dv.getUint16(6, true), n = dv.getUint32(8, true);
-  const jan1 = Date.UTC(year, 0, 1) / 1000;
-  const ndays = (Date.UTC(year + 1, 0, 1) / 1000 - jan1) / DAY;
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const off = 12 + i * rs; if (off + rs > bytes.length) break;
-    let name = ""; for (let j = 0; j < 24 && bytes[off + j]; j++) name += String.fromCharCode(bytes[off + j]);
-    const target = dv.getUint16(off + 24, true) || 1;
-    const days = {};
-    for (let d = 4; d < Math.min(ndays, rs - 26); d++) { const v = bytes[off + 26 + d]; if (v) days[dkey(jan1 + d * DAY)] = v; }
-    out.push({ name: name.replace(/_/g, " "), target, days });
-  }
-  return out;
-}
-
-/* Oura: our sync format {source:"oura", daily_sleep:[], daily_readiness:[], daily_activity:[], sleep:[]}
-   or a raw API response {data:[...]}, whose rows are classified by their fields. */
-const OURA_KEYS = ["daily_sleep", "daily_readiness", "daily_activity", "sleep"];
-function classifyOuraRow(r) {
-  if (!r || typeof r !== "object" || !r.day) return null;
-  if ("bedtime_start" in r) return "sleep";
-  if ("steps" in r || "active_calories" in r) return "daily_activity";
-  if ("temperature_deviation" in r || (r.contributors && "hrv_balance" in r.contributors)) return "daily_readiness";
-  if (r.contributors && ("deep_sleep" in r.contributors || "rem_sleep" in r.contributors)) return "daily_sleep";
-  return null;
-}
-function ouraCollections(j) {
-  if (!j || typeof j !== "object") return null;
-  const out = {}; let n = 0;
-  OURA_KEYS.forEach(k => { if (Array.isArray(j[k])) { out[k] = j[k]; n += j[k].length + 1; } });
-  if (Array.isArray(j.data)) j.data.forEach(r => { const k = classifyOuraRow(r); if (k) { (out[k] ||= []).push(r); n++; } });
-  return n ? out : null;
-}
-const wallClock = s => typeof s === "string" ? naive(s.slice(0, 19)) : NaN; // keep the ring's local time, drop the offset
+/* ---------- parsers (parsers.js) ---------- */
+const { naive, dkey, wallClock, detect, parseLog, parseCheckins, parseActivities, parseHabits, ouraCollections } = LifeParsers;
 
 /* ---------- storage ---------- */
+let SERVER = null; // set in server mode: { me, data, uploads }
 let FILES = []; // {name, kind, data (text or b64), year?}
 function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(FILES)); } catch (e) { /* storage unavailable: keep in memory */ } }
 function restore() { try { const s = localStorage.getItem(STORE_KEY); if (s) FILES = JSON.parse(s) || []; } catch (e) { FILES = []; } }
@@ -400,35 +348,40 @@ async function addFile(name, buf, lastModified) {
 }
 
 /* ---------- model ---------- */
-let M = null;
-function buildModel() {
-  const logMap = new Map(), chkMap = new Map(); let habits = []; const acts = new Set();
-  const oDays = {}, oSleep = new Map();
-  const od = day => (oDays[day] ||= { day });
+// Both modes produce the same source shape:
+// { log: [{s, e, act}], checkins: [{t, core, mid, leaf}], habits: [{name, target, days}], activities: [name], oura: [{daily_sleep: [], ...}] }
+function sourcesFromFiles() {
+  const src = { log: [], checkins: [], habits: [], activities: [], oura: [] };
   for (const f of FILES) {
     try {
-      if (f.kind === "log") parseLog(f.data).forEach(r => logMap.set(r.s + "|" + r.act, r));
-      else if (f.kind === "checkins") parseCheckins(f.data).forEach(c => chkMap.set(c.t + c.core + c.mid + c.leaf, c));
-      else if (f.kind === "oura") {
-        const c = ouraCollections(JSON.parse(f.data)) || {};
-        (c.daily_sleep || []).forEach(r => { if (r.score != null) od(r.day).sleepScore = r.score; });
-        (c.daily_readiness || []).forEach(r => { const d = od(r.day); if (r.score != null) d.readiness = r.score; if (r.temperature_deviation != null) d.temp = r.temperature_deviation; });
-        (c.daily_activity || []).forEach(r => { const d = od(r.day); if (r.score != null) d.activity = r.score; if (r.steps != null) d.steps = r.steps; if (r.active_calories != null) d.kcal = r.active_calories; });
-        (c.sleep || []).forEach(r => {
-          if (r.type && r.type !== "long_sleep") return; // ignore naps and rests
-          const s = { day: r.day, start: wallClock(r.bedtime_start), end: wallClock(r.bedtime_end), asleep: r.total_sleep_duration, inBed: r.time_in_bed,
-            eff: r.efficiency, hrv: r.average_hrv, low: r.lowest_heart_rate, deep: r.deep_sleep_duration, rem: r.rem_sleep_duration };
-          const prev = oSleep.get(r.day); if (!prev || (s.asleep || 0) > (prev.asleep || 0)) oSleep.set(r.day, s);
-        });
-      }
-      else if (f.kind === "activities") f.data.split(/\r?\n/).map(s => s.trim()).filter(Boolean).forEach(a => acts.add(a));
-      else if (f.kind === "habits") {
-        for (const h of parseHabits(b64dec(f.data), f.year)) {
-          const ex = habits.find(x => x.name === h.name);
-          if (ex) Object.assign(ex.days, h.days); else habits.push(h);
-        }
-      }
+      if (f.kind === "log") src.log.push(...parseLog(f.data));
+      else if (f.kind === "checkins") src.checkins.push(...parseCheckins(f.data));
+      else if (f.kind === "activities") src.activities.push(...parseActivities(f.data));
+      else if (f.kind === "habits") src.habits.push(...parseHabits(b64dec(f.data), f.year));
+      else if (f.kind === "oura") { const c = ouraCollections(JSON.parse(f.data)); if (c) src.oura.push(c); }
     } catch (e) { console.warn("Could not parse", f.name, e); }
+  }
+  return src;
+}
+
+let M = null;
+function buildModel(src) {
+  const logMap = new Map(), chkMap = new Map(), habits = [], acts = new Set(src.activities);
+  const oDays = {}, oSleep = new Map();
+  const od = day => (oDays[day] ||= { day });
+  src.log.forEach(r => logMap.set(r.s + "|" + r.act, r));
+  src.checkins.forEach(c => chkMap.set(c.t + c.core + c.mid + c.leaf, c));
+  src.habits.forEach(h => { const ex = habits.find(x => x.name === h.name); if (ex) Object.assign(ex.days, h.days); else habits.push({ ...h, days: { ...h.days } }); });
+  for (const c of src.oura) {
+    (c.daily_sleep || []).forEach(r => { if (r.score != null) od(r.day).sleepScore = r.score; });
+    (c.daily_readiness || []).forEach(r => { const d = od(r.day); if (r.score != null) d.readiness = r.score; if (r.temperature_deviation != null) d.temp = r.temperature_deviation; });
+    (c.daily_activity || []).forEach(r => { const d = od(r.day); if (r.score != null) d.activity = r.score; if (r.steps != null) d.steps = r.steps; if (r.active_calories != null) d.kcal = r.active_calories; });
+    (c.sleep || []).forEach(r => {
+      if (r.type && r.type !== "long_sleep") return; // ignore naps and rests
+      const s = { day: r.day, start: wallClock(r.bedtime_start), end: wallClock(r.bedtime_end), asleep: r.total_sleep_duration, inBed: r.time_in_bed,
+        eff: r.efficiency, hrv: r.average_hrv, low: r.lowest_heart_rate, deep: r.deep_sleep_duration, rem: r.rem_sleep_duration };
+      const prev = oSleep.get(r.day); if (!prev || (s.asleep || 0) > (prev.asleep || 0)) oSleep.set(r.day, s);
+    });
   }
   const log = [...logMap.values()].sort((a, b) => a.s - b.s);
   const checkins = [...chkMap.values()].sort((a, b) => a.t - b.t);
@@ -459,7 +412,7 @@ function piecesFor(day) {
 const tipAttr = html => `data-tip="${esc(html)}"`;
 
 function render() {
-  buildModel();
+  buildModel(SERVER ? SERVER.data : sourcesFromFiles());
   renderChips();
   const days = rangeDays();
   const lo = days[0], hi = days.length ? days[days.length - 1] + DAY : 0;
@@ -484,6 +437,15 @@ function render() {
 }
 
 function renderChips() {
+  if (SERVER) {
+    const ups = SERVER.uploads || [];
+    const shown = ups.slice(0, 8);
+    $("#chips").innerHTML = ups.length ? shown.map(u =>
+      `<span class="chip" title="Uploaded ${esc(new Date(u.created_at * 1000).toLocaleString("en-GB"))}"><b>${u.kind}</b>${esc(u.filename)} <span class="note">+${u.added}${u.updated ? ` ~${u.updated}` : ""}</span>&nbsp;</span>`).join("") +
+      (ups.length > shown.length ? `<span class="sub">and ${ups.length - shown.length} earlier</span>` : "")
+      : `<span class="sub">No uploads yet.</span>`;
+    return;
+  }
   $("#chips").innerHTML = FILES.length ? FILES.map((f, i) =>
     `<span class="chip"><b>${f.kind}</b>${esc(f.name)}${f.year ? " · " + f.year : ""}<button type="button" data-rm="${i}" aria-label="Remove ${esc(f.name)}">×</button></span>`).join("")
     : `<span class="sub">No files yet.</span>`;
@@ -579,11 +541,33 @@ const OURA_SERIES = [
   { k: "readiness", name: "Readiness", v: "--g-work" },
   { k: "activity", name: "Activity", v: "--g-care" },
 ];
+function ago(t) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - t);
+  return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : new Date(t * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+function renderOuraControls() {
+  const ctl = $("#ouraCtl");
+  if (!SERVER) { ctl.hidden = true; return; }
+  const o = SERVER.me.oura; ctl.hidden = false;
+  let state, buttons = "";
+  if (!o.configured) state = `<span class="dot"></span>Oura sign-in isn't set up on the server (OURA_CLIENT_ID and OURA_CLIENT_SECRET).`;
+  else if (!o.connected) { state = `<span class="dot"></span>Not connected`; buttons = `<a class="ghost primary" href="/api/oura/connect" style="text-decoration:none">Connect Oura</a>`; }
+  else if (o.status === "needs_reauth") { state = `<span class="dot warn"></span>${esc(o.lastError || "Oura needs to be connected again.")}`; buttons = `<a class="ghost primary" href="/api/oura/connect" style="text-decoration:none">Reconnect Oura</a><button type="button" class="ghost" data-oura="disconnect">Disconnect</button>`; }
+  else {
+    state = o.syncing ? `<span class="dot on"></span>Syncing…`
+      : `<span class="dot ${o.lastError ? "warn" : "on"}"></span>Connected · ${o.lastSyncAt ? "synced " + ago(o.lastSyncAt) : "first sync pending"}${o.lastError ? ` · ${esc(o.lastError)}` : ""}${o.nextSyncAt ? ` · next sync ${new Date(o.nextSyncAt * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}` : ""}`;
+    buttons = `<button type="button" class="ghost" data-oura="sync"${o.syncing ? " disabled" : ""}>Sync now</button><button type="button" class="ghost" data-oura="disconnect">Disconnect</button>`;
+  }
+  ctl.innerHTML = `${buttons}<span class="state">${state}</span><span class="msg" id="ouraMsg"></span>`;
+}
 function renderOura(days) {
+  renderOuraControls();
   const el = $("#oura");
   if (!M.oura.any) {
     $("#ouraSub").textContent = "";
-    el.innerHTML = `<div class="empty">No Oura data yet. Run <code>scripts/oura-sync.mjs</code> with your Oura token, or drop an <code>oura.json</code> here.</div>`;
+    el.innerHTML = SERVER
+      ? `<div class="empty">${SERVER.me.oura.connected ? "Waiting for the first sync from Oura." : "Connect Oura to sync your sleep, readiness and activity automatically, or drop an <code>oura.json</code> export above."}</div>`
+      : `<div class="empty">No Oura data yet. Run <code>scripts/oura-sync.mjs</code> with your Oura token, or drop an <code>oura.json</code> here.</div>`;
     return;
   }
   const ks = days.map(dkey), rows = ks.map(k => M.oura.days[k] || {});
@@ -736,6 +720,8 @@ $("#range").addEventListener("click", e => {
   render();
 });
 async function ingest(fileList) {
+  if (!$("#login").hidden) return; // signed out: ignore drops
+  if (SERVER) return ingestServer(fileList);
   const res = [];
   for (const f of fileList) res.push(await addFile(f.name, await f.arrayBuffer(), f.lastModified));
   save(); render();
@@ -748,8 +734,113 @@ const drop = $("#drop");
 ["dragleave", "drop"].forEach(t => document.addEventListener(t, e => { e.preventDefault(); if (t === "drop" || !e.relatedTarget) drop.classList.remove("over"); }));
 document.addEventListener("drop", e => { if (e.dataTransfer?.files?.length) ingest([...e.dataTransfer.files]); });
 
+/* ---------- server mode ---------- */
+async function api(path, { method = "GET", body, headers = {} } = {}) {
+  const res = await fetch(path, { method, body, credentials: "same-origin", headers: { "X-Life-Dash": "1", ...headers } });
+  let json = null;
+  if ((res.headers.get("content-type") || "").includes("json")) json = await res.json().catch(() => null);
+  return { status: res.status, ok: res.ok, json };
+}
+// Is there a Life Dash server behind this page? Static hosting, file:// and artifact previews answer "no".
+async function probeServer() {
+  try { const r = await api("/api/me"); if (r.json && (r.json.user || r.status === 401)) return r; } catch (e) { /* no server */ }
+  return null;
+}
+async function loadServer(me) {
+  const [d, u] = await Promise.all([api("/api/data"), api("/api/uploads")]);
+  if (d.status === 401) return showLogin();
+  SERVER = { me, data: d.json, uploads: u.json || [] };
+  $("#login").hidden = true; $("#app").hidden = false;
+  $("#account").hidden = false; $("#whoami").textContent = me.user.username;
+  $("#storeNote").textContent = "Uploads are saved to your account; records already stored are skipped.";
+  render();
+}
+function showLogin(msg) {
+  SERVER = null; $("#app").hidden = true; $("#login").hidden = false;
+  $("#lMsg").textContent = msg || ""; $("#lUser").focus();
+}
+async function refreshMe() {
+  const r = await api("/api/me");
+  if (r.status === 401) return showLogin("Your session ended. Sign in again.");
+  if (r.json?.user) { SERVER.me = r.json; renderOuraControls(); }
+  return r.json;
+}
+let pollTimer = null;
+function pollOura(rounds = 60) { // while a sync runs, check every 3 s and reload data when it finishes
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    const me = await refreshMe();
+    if (!me) return;
+    if (me.oura.syncing || (me.oura.connected && !me.oura.lastSyncAt && me.oura.status === "active")) { if (rounds > 1) pollOura(rounds - 1); }
+    else loadServer(me);
+  }, 3000);
+}
+async function ingestServer(fileList) {
+  const out = [];
+  $("#upMsg").className = "msg"; $("#upMsg").textContent = `Uploading ${fileList.length} file${fileList.length > 1 ? "s" : ""}…`;
+  for (const f of fileList) {
+    try {
+      const r = await api("/api/uploads", { method: "POST", body: f, headers: { "X-Filename": encodeURIComponent(f.name), "X-Last-Modified": String(f.lastModified || ""), "X-Tz-Offset": String(-new Date().getTimezoneOffset() * 60), "Content-Type": "application/octet-stream" } });
+      if (r.status === 401) return showLogin("Your session ended. Sign in again.");
+      if (!r.ok) { out.push({ err: true, text: r.json?.error || `${f.name}: upload failed (HTTP ${r.status}).` }); continue; }
+      const u = r.json.upload;
+      out.push({ text: r.json.duplicate
+        ? `${f.name}: already uploaded on ${new Date(u.created_at * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}, nothing added.`
+        : `${f.name}: ${u.added} new${u.updated ? `, ${u.updated} updated` : ""}, ${u.unchanged} already stored.` });
+    } catch (e) { out.push({ err: true, text: `${f.name}: couldn't reach the server.` }); }
+  }
+  await loadServer(SERVER.me);
+  $("#upMsg").className = "msg" + (out.some(o => o.err) ? " err" : " ok");
+  $("#upMsg").innerHTML = out.map(o => esc(o.text)).join("<br>");
+}
+$("#login").addEventListener("submit", async e => {
+  e.preventDefault();
+  $("#lBtn").disabled = true; $("#lMsg").textContent = "";
+  try {
+    const r = await api("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: $("#lUser").value, password: $("#lPass").value }) });
+    if (!r.ok) { $("#lMsg").textContent = r.json?.error || "Sign-in failed."; return; }
+    $("#lPass").value = "";
+    const me = await api("/api/me");
+    await loadServer(me.json);
+  } catch (err) { $("#lMsg").textContent = "Couldn't reach the server."; }
+  finally { $("#lBtn").disabled = false; }
+});
+$("#logout").addEventListener("click", async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); showLogin(); });
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-oura]"); if (!b || !SERVER) return;
+  const action = b.dataset.oura;
+  b.disabled = true;
+  const r = await api(`/api/oura/${action}`, { method: "POST" });
+  if (r.status === 401) return showLogin("Your session ended. Sign in again.");
+  if (r.json?.oura) SERVER.me.oura = r.json.oura;
+  if (action === "sync" && r.ok) await loadServer(SERVER.me);
+  else render();
+  const m = $("#ouraMsg");
+  if (m) {
+    m.className = "msg" + (r.ok ? " ok" : " err");
+    m.textContent = r.ok ? (action === "sync" ? `Synced: ${r.json.added} new, ${r.json.updated} updated.` : "Oura disconnected. Data already synced is kept.") : (r.json?.error || "That didn't work.");
+  }
+});
+const OURA_RETURN = {
+  connected: ["ok", "Oura connected. Fetching your history in the background…"],
+  denied: ["err", "Oura access wasn't granted."],
+  error: ["err", "Connecting Oura failed. Try again."],
+  not_configured: ["err", "Oura sign-in isn't set up on the server yet."],
+};
+
 /* ---------- boot ---------- */
 (async function boot() {
+  const probe = await probeServer();
+  if (probe) {
+    try { const r = +localStorage.getItem("lifedash.range"); if ([7, 14, 30].includes(r)) { RANGE = r; $("#range").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", +x.dataset.r === r)); } } catch (e) {}
+    const ret = new URLSearchParams(location.search).get("oura");
+    if (ret) history.replaceState(null, "", location.pathname);
+    if (probe.status === 401) return showLogin(ret ? "Sign in to finish connecting Oura." : "");
+    await loadServer(probe.json);
+    if (ret && OURA_RETURN[ret]) { const m = $("#ouraMsg"); if (m) { m.className = "msg " + OURA_RETURN[ret][0]; m.textContent = OURA_RETURN[ret][1]; } }
+    if (ret === "connected" || probe.json.oura.syncing) pollOura();
+    return;
+  }
   restore();
   try { const r = +localStorage.getItem("lifedash.range"); if ([7, 14, 30].includes(r)) { RANGE = r; $("#range").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", +x.dataset.r === r)); } } catch (e) {}
   if (!FILES.length) {

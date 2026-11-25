@@ -1,24 +1,20 @@
 name: Deploy
 
-# Deploys the dashboard to a server over SSH (rsync), and optionally syncs Oura data to it daily.
+# Copies the app to a server over SSH (rsync) and restarts it.
 #
 # Repository secrets:
 #   SSH_PRIVATE_KEY   private key of a deploy user allowed to write DEPLOY_PATH
 #   SSH_KNOWN_HOSTS   output of `ssh-keyscan -p <port> <host>`; host keys are always verified
-#   OURA_TOKEN        (optional) Oura access token; enables the oura-sync job
 # Repository variables (or secrets with the same names):
-#   SSH_HOST, SSH_USER, DEPLOY_PATH (e.g. /var/www/life-dash), SSH_PORT (optional, default 22)
+#   SSH_HOST, SSH_USER, DEPLOY_PATH (e.g. /srv/life-dash), SSH_PORT (optional, default 22)
+#   RESTART_COMMAND   (optional) run on the server after upload, e.g. "sudo systemctl restart life-dash"
+#
+# The server keeps its own .env, var/ and data/ in DEPLOY_PATH; a deploy never overwrites or deletes them.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      oura_days:
-        description: "Days of Oura data to fetch"
-        default: "14"
-  schedule:
-    - cron: "17 6 * * *" # daily Oura sync (UTC)
 
 permissions:
   contents: read
@@ -27,17 +23,26 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
-env:
-  SSH_HOST: ${{ vars.SSH_HOST || secrets.SSH_HOST }}
-  SSH_USER: ${{ vars.SSH_USER || secrets.SSH_USER }}
-  SSH_PORT: ${{ vars.SSH_PORT || secrets.SSH_PORT || '22' }}
-  DEPLOY_PATH: ${{ vars.DEPLOY_PATH || secrets.DEPLOY_PATH }}
-
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+
   deploy:
-    if: github.event_name != 'schedule'
+    needs: test
     runs-on: ubuntu-latest
     environment: production
+    env:
+      SSH_HOST: ${{ vars.SSH_HOST || secrets.SSH_HOST }}
+      SSH_USER: ${{ vars.SSH_USER || secrets.SSH_USER }}
+      SSH_PORT: ${{ vars.SSH_PORT || secrets.SSH_PORT || '22' }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || secrets.DEPLOY_PATH }}
+      RESTART_COMMAND: ${{ vars.RESTART_COMMAND }}
     steps:
       - uses: actions/checkout@v4
 
@@ -53,63 +58,21 @@ jobs:
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
 
-      - name: Stage site
+      - name: Stage app
         run: |
           mkdir -p dist
-          cp index.html dist/
-          cp -r scripts dist/
+          cp -r index.html parsers.js package.json server scripts deploy dist/
 
       - name: Upload
         run: |
           SSH="ssh -i $HOME/.ssh/deploy_key -p $SSH_PORT -o StrictHostKeyChecking=yes -o BatchMode=yes"
-          $SSH "$SSH_USER@$SSH_HOST" "mkdir -p '$DEPLOY_PATH/data'"
-          # data/ on the server is never touched by a deploy (excluded from transfer and --delete).
-          rsync -rlptz --delete --exclude '/data/' -e "$SSH" dist/ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
-          echo "Deployed $(git rev-parse --short HEAD) to $SSH_HOST:$DEPLOY_PATH"
+          $SSH "$SSH_USER@$SSH_HOST" "mkdir -p '$DEPLOY_PATH'"
+          # excluded paths are neither transferred nor deleted
+          rsync -rlptz --delete --exclude '/data/' --exclude '/var/' --exclude '/.env' -e "$SSH" dist/ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+          echo "Uploaded $(git rev-parse --short HEAD) to $SSH_HOST:$DEPLOY_PATH"
 
-  oura-sync:
-    needs: [deploy]
-    # run after deploy on manual runs; on schedule deploy is skipped, so don't wait on it
-    if: ${{ always() && github.event_name != 'push' && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') }}
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check for token
-        id: token
-        env:
-          OURA_TOKEN: ${{ secrets.OURA_TOKEN }}
-        run: |
-          if [ -n "$OURA_TOKEN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "::notice::OURA_TOKEN is not set; skipping Oura sync"; fi
-
-      - uses: actions/setup-node@v4
-        if: steps.token.outputs.present == 'true'
-        with:
-          node-version: 20
-
-      - name: Configure SSH
-        if: steps.token.outputs.present == 'true'
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
-
-      - name: Fetch, sync and upload
-        if: steps.token.outputs.present == 'true'
-        env:
-          OURA_TOKEN: ${{ secrets.OURA_TOKEN }}
-          DAYS: ${{ github.event.inputs.oura_days || '14' }}
+      - name: Restart
+        if: env.RESTART_COMMAND != ''
         run: |
           SSH="ssh -i $HOME/.ssh/deploy_key -p $SSH_PORT -o StrictHostKeyChecking=yes -o BatchMode=yes"
-          mkdir -p work
-          # pull the current oura.json and manifest so new data is merged into them
-          for f in oura.json manifest.json; do
-            rsync -t -e "$SSH" "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/data/$f" work/ 2>/dev/null || true
-          done
-          node scripts/oura-sync.mjs --days "$DAYS" --out work
-          $SSH "$SSH_USER@$SSH_HOST" "mkdir -p '$DEPLOY_PATH/data'"
-          rsync -t -e "$SSH" work/oura.json work/manifest.json "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/data/"
+          $SSH "$SSH_USER@$SSH_HOST" "$RESTART_COMMAND"

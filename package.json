@@ -1,0 +1,14 @@
+{
+  "name": "life-dash",
+  "private": true,
+  "type": "module",
+  "description": "Personal life-tracking dashboard with a small Node backend (SQLite, login, Oura sync).",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/server.mjs",
+    "user": "node --env-file-if-exists=.env server/cli.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}
