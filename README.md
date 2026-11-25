@@ -15,7 +15,7 @@ The page detects which mode it's in by checking for the server's `/api/me`.
 - **Sleep per night**: duration, average bedtime and wake time, 8-hour reference line.
 - **Habits**: heatmap of each habit against its daily target, with days met and current streak.
 - **Tasks** (from Mindwtr): tasks completed per day, open tasks by status, active projects, and recently completed tasks.
-- **Oura**: sleep, readiness and activity scores, daily steps, and a nightly table (asleep vs in bed, efficiency, deep/REM, HRV, lowest heart rate, temperature deviation) next to the sleep you logged.
+- **Oura**: sleep, readiness and activity scores, average HRV and lowest heart rate per night, daily steps, and a nightly table (asleep vs in bed, efficiency, deep/REM, HRV, lowest heart rate, temperature deviation) next to the sleep you logged.
 - **Mood check-ins** and **mood by activity**: each check-in is matched to the activity running at that moment.
 - **Time log table**: the raw entries for the selected range.
 

@@ -173,7 +173,7 @@ header.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; j
 .dot.on { background: var(--good-ink); } .dot.warn { background: var(--neg); }
 /* tasks (Mindwtr) */
 .cols.done .c { background: var(--accent); }
-#tasks { display: grid; gap: 14px; min-width: 0; }
+#tasks, #oura { display: grid; gap: 14px; min-width: 0; }
 .tgroup { display: grid; gap: 8px; align-content: start; min-width: 0; }
 .mwform { display: flex; flex-wrap: wrap; gap: 8px; flex-basis: 100%; }
 .mwform input { font: inherit; font-size: 13px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; flex: 1 1 160px; min-width: 0; }
@@ -610,6 +610,34 @@ function renderOuraControls() {
   }
   ctl.innerHTML = `${buttons}<span class="state">${state}</span><span class="msg" id="ouraMsg"></span>`;
 }
+/* One-series line chart for a nightly metric. values[i] is null where there's no data. */
+function metricChart({ days, values, width, name, unit, color, digits = 0 }) {
+  const have = values.filter(v => v != null);
+  if (!have.length) return "";
+  const W = Math.max(260, width), H = 140, L = 30, R = 58, T = 8, B = 20;
+  const mn = Math.min(...have), mx = Math.max(...have);
+  const stepV = [1, 2, 5, 10, 20, 50].find(st => (mx - mn) / st <= 4) || 100;
+  const lo = Math.floor((mn - stepV * .5) / stepV) * stepV, hi = Math.ceil((mx + stepV * .5) / stepV) * stepV;
+  const x = i => L + (days.length > 1 ? i / (days.length - 1) : .5) * (W - L - R);
+  const y = v => T + (hi - v) / (hi - lo) * (H - T - B);
+  let svg = "";
+  for (let g = lo; g <= hi + 1e-9; g += stepV) svg += `<line x1="${L}" x2="${W - R}" y1="${y(g)}" y2="${y(g)}" stroke="var(--line)"/><text x="${L - 6}" y="${y(g) + 3}" text-anchor="end">${g}</text>`;
+  const xstep = Math.ceil(days.length / (W < 420 ? 5 : 8));
+  days.forEach((d, i) => { if (i % xstep === 0) svg += `<text x="${x(i)}" y="${H - 4}" text-anchor="middle">${new Date(d * 1000).getUTCDate()}</text>`; });
+  const avg = have.reduce((a, b) => a + b, 0) / have.length;
+  svg += `<line x1="${L}" x2="${W - R}" y1="${y(avg)}" y2="${y(avg)}" stroke="var(--ink-3)" stroke-dasharray="3 3"/>`;
+  let d = "", pen = false, last = null;
+  values.forEach((v, i) => { if (v == null) { pen = false; return; } d += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`; pen = true; last = { i, v }; });
+  svg += `<path d="${d}" fill="none" stroke="var(${color})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  values.forEach((v, i) => { if (v != null && values[i - 1] == null && values[i + 1] == null) svg += `<circle cx="${x(i)}" cy="${y(v)}" r="3" fill="var(${color})"/>`; });
+  svg += `<circle cx="${x(last.i)}" cy="${y(last.v)}" r="4" fill="var(${color})" stroke="var(--panel)" stroke-width="2"/>`;
+  svg += `<text class="dl" x="${W - R + 10}" y="${y(last.v) + 4}">${last.v.toFixed(digits)} ${unit}</text>`;
+  const cw = (W - L - R) / Math.max(1, days.length - 1);
+  days.forEach((dd, i) => { svg += `<rect class="hit" x="${x(i) - cw / 2}" y="${T}" width="${cw}" height="${H - T - B}" ${tipAttr(`<b>${values[i] != null ? values[i].toFixed(digits) + " " + unit : "No data"}</b> · ${name}<br>Night into ${fmtDate(dd)}`)}/>`; });
+  return `<div class="tgroup"><div class="panel-head"><span class="eyebrow">${name}</span><span class="sub">avg ${avg.toFixed(digits)} ${unit} · dashed line</span></div>
+    <div class="ochart"><svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="${name} per night, average ${avg.toFixed(digits)} ${unit}">${svg}</svg></div></div>`;
+}
+
 function renderOura(days) {
   renderOuraControls();
   const el = $("#oura");
@@ -655,6 +683,13 @@ function renderOura(days) {
   const legend = `<div class="legend">${OURA_SERIES.map(s => `<span><i class="sw" style="background:var(${s.v})"></i>${s.name} score</span>`).join("")}</div>`;
   let html = `${legend}<div class="ochart"><svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="Oura sleep, readiness and activity scores per day">${svg}</svg></div>`;
 
+  // HRV and lowest heart rate: different units, so two charts side by side rather than one with two axes
+  const nightly = ks.map(k => M.oura.sleep.get(k));
+  const full = el.clientWidth || 600, half = full >= 856 ? (full - 16) / 2 : full;
+  const hrv = metricChart({ days, values: nightly.map(n => n?.hrv ?? null), width: half, name: "Average HRV", unit: "ms", color: "--g-care" });
+  const low = metricChart({ days, values: nightly.map(n => n?.low ?? null), width: half, name: "Lowest heart rate", unit: "bpm", color: "--g-work" });
+  if (hrv || low) html += `<div class="grid2">${hrv}${low}</div>`;
+
   // steps
   const steps = rows.map(r => r.steps), have = steps.filter(v => v != null);
   if (have.length) {
@@ -662,7 +697,7 @@ function renderOura(days) {
     const grid = [0, 5000, 10000].map(v => `<div class="gl${v === 10000 ? " target" : ""}" style="bottom:${v / top * 100}%"><span>${v / 1000}k</span></div>`).join("");
     const cols = rows.map((r, i) => `<div class="c" style="height:${(r.steps || 0) / top * 100}%" ${tipAttr(`<b>${r.steps != null ? r.steps.toLocaleString("en-GB") : "No data"}</b> steps · ${fmtDate(days[i])}${r.kcal != null ? `<br>${r.kcal} active kcal` : ""}`)}></div>`).join("");
     const xl = ks.map((k, i) => `<span>${i % step === 0 ? +k.slice(8) : ""}</span>`).join("");
-    html += `<div class="panel-head"><span class="eyebrow">Steps</span><span class="sub">${Math.round(have.reduce((a, b) => a + b, 0) / have.length).toLocaleString("en-GB")} per day · dashed line is 10k</span></div><div class="cols steps" style="height:110px">${grid}${cols}</div><div class="xlabels">${xl}</div>`;
+    html += `<div class="panel-head"><span class="eyebrow">Steps</span><span class="sub">${Math.round(have.reduce((a, b) => a + b, 0) / have.length).toLocaleString("en-GB")} per day · dashed line is 10k</span></div><div><div class="cols steps" style="height:110px">${grid}${cols}</div><div class="xlabels">${xl}</div></div>`;
   }
 
   // nights: what the ring measured next to what was logged
