@@ -21,12 +21,6 @@ export async function verifyPassword(password, stored) {
   return timingSafeEqual(got, expected) && Boolean(stored);
 }
 
-// Readable one-time code, e.g. "K7QX-M2PD" (no 0/O/1/I to avoid misreading)
-export function setupCode() {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789", b = randomBytes(8);
-  const s = [...b].map(x => alphabet[x % alphabet.length]).join("");
-  return `${s.slice(0, 4)}-${s.slice(4)}`;
-}
 const normCode = c => String(c || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 export const codesMatch = (a, b) => {
   const x = Buffer.from(normCode(a)), y = Buffer.from(normCode(b));

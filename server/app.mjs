@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ROOT } from "./config.mjs";
 import { openDb, now, tx } from "./db.mjs";
-import { verifyPassword, hashPassword, randomToken, sha256, makeBox, setupCode as newSetupCode, codesMatch, passwordProblem, USERNAME_RE } from "./crypto.mjs";
+import { verifyPassword, hashPassword, randomToken, sha256, makeBox, codesMatch, passwordProblem, USERNAME_RE } from "./crypto.mjs";
 import { ingestUpload, userData, UploadError } from "./ingest.mjs";
 import { createOura } from "./oura.mjs";
 
@@ -19,18 +19,11 @@ export function createApp(cfg, { log = console } = {}) {
   const oura = createOura({ db, cfg, box, log });
   const failures = new Map(); // ip -> { n, until } for login and setup throttling
 
-  /* First-run setup: while there are no users, the first visitor can create one by entering the setup code,
-     which is printed in the server log (or set with SETUP_CODE). */
-  let setupCode = cfg.setupCode || null;
+  /* First-run setup: while there are no users, the first visitor can create one.
+     If SETUP_CODE is set, they must also enter it. */
   const usersExist = () => Boolean(db.prepare("SELECT 1 FROM users LIMIT 1").get());
-  function currentSetupCode() {
-    if (!setupCode) setupCode = newSetupCode();
-    return setupCode;
-  }
   function announceSetup() {
-    if (usersExist()) return;
-    const code = currentSetupCode();
-    log.info?.(`No users yet. Open ${cfg.publicUrl} to create your account${cfg.setupCode ? " with the SETUP_CODE you configured." : ` with setup code: ${code}`}`);
+    if (!usersExist()) log.info?.(`No users yet. Open ${cfg.publicUrl} to create your account${cfg.setupCode ? " (you'll need the SETUP_CODE you configured)" : ""}.`);
   }
   function throttled(ip) { const f = failures.get(ip); return f && f.until > Date.now(); }
   function fail(ip) { const n = (failures.get(ip)?.n || 0) + 1; failures.set(ip, { n, until: n >= 5 ? Date.now() + 15 * 60 * 1000 : 0 }); }
@@ -97,7 +90,7 @@ export function createApp(cfg, { log = console } = {}) {
       if (usersExist()) throw new HttpError(409, "Setup is already done. Sign in instead.");
       if (throttled(ip)) throw new HttpError(429, "Too many wrong setup codes. Try again in a few minutes.");
       const { username = "", password = "", code = "" } = await readJson(req);
-      if (!codesMatch(code, currentSetupCode())) { fail(ip); throw new HttpError(403, "That setup code isn't right. It's printed in the server log."); }
+      if (cfg.setupCode && !codesMatch(code, cfg.setupCode)) { fail(ip); throw new HttpError(403, "That setup code isn't right. It's the SETUP_CODE in the server's settings."); }
       if (!USERNAME_RE.test(String(username))) throw new HttpError(400, "Use a username of up to 64 letters, numbers, dots, dashes, underscores or @.");
       const problem = passwordProblem(password);
       if (problem) throw new HttpError(400, problem);
@@ -108,7 +101,6 @@ export function createApp(cfg, { log = console } = {}) {
       });
       if (!userId) throw new HttpError(409, "Setup is already done. Sign in instead.");
       failures.delete(ip);
-      setupCode = cfg.setupCode || null; // a generated code is one-time
       log.info?.(`First user ${username} created through setup.`);
       startSession(res, userId);
       send(res, 201, { user: { username: String(username) } });
@@ -125,8 +117,7 @@ export function createApp(cfg, { log = console } = {}) {
       const u = sessionUser(req);
       if (!u) {
         const setupRequired = !usersExist();
-        if (setupRequired && !setupCode) announceSetup(); // users were removed while running: issue a new code
-        return send(res, 401, { error: "Sign in to continue.", setupRequired });
+        return send(res, 401, { error: "Sign in to continue.", setupRequired, setupCodeRequired: setupRequired && Boolean(cfg.setupCode) });
       }
       send(res, 200, { user: { username: u.username }, oura: oura.status(u.id) });
     },

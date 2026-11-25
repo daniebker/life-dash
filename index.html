@@ -211,8 +211,8 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
 <body>
 <form class="login" id="login" hidden>
   <div><div class="eyebrow">Life Dash</div><h1 id="lTitle">Sign in</h1></div>
-  <p class="sub" id="lIntro" hidden>There are no accounts yet. Create the first one to start using Life Dash. The setup code is printed in the server log (for Docker: <code>docker compose logs life-dash</code>).</p>
-  <label for="lCode" id="lCodeRow" hidden>Setup code<input id="lCode" name="code" autocomplete="one-time-code" spellcheck="false" placeholder="XXXX-XXXX"></label>
+  <p class="sub" id="lIntro" hidden>There are no accounts yet. Create the first one to start using Life Dash.</p>
+  <label for="lCode" id="lCodeRow" hidden>Setup code<input id="lCode" name="code" autocomplete="one-time-code" spellcheck="false"></label>
   <label for="lUser">Username<input id="lUser" name="username" autocomplete="username" required></label>
   <label for="lPass">Password<input id="lPass" name="password" type="password" autocomplete="current-password" required></label>
   <label for="lPass2" id="lPass2Row" hidden>Repeat password<input id="lPass2" name="password2" type="password" autocomplete="new-password"></label>
@@ -760,17 +760,19 @@ async function loadServer(me) {
   render();
 }
 let SETUP = false; // no accounts exist yet: the form creates the first one
-function showLogin(msg, setup = false) {
+function showLogin(msg, setup = false, needCode = false) {
   SERVER = null; SETUP = setup;
   $("#app").hidden = true; $("#login").hidden = false;
   $("#lTitle").textContent = setup ? "Create your account" : "Sign in";
   $("#lBtn").textContent = setup ? "Create account" : "Sign in";
-  ["#lIntro", "#lCodeRow", "#lPass2Row"].forEach(s => $(s).hidden = !setup);
-  $("#lCode").required = $("#lPass2").required = setup;
+  ["#lIntro", "#lPass2Row"].forEach(s => $(s).hidden = !setup);
+  $("#lCodeRow").hidden = !(setup && needCode);
+  $("#lCode").required = setup && needCode;
+  $("#lPass2").required = setup;
   $("#lPass").autocomplete = setup ? "new-password" : "current-password";
   $("#lPass").minLength = setup ? 10 : 0;
   $("#lMsg").textContent = msg || "";
-  (setup ? $("#lCode") : $("#lUser")).focus();
+  (setup && needCode ? $("#lCode") : $("#lUser")).focus();
 }
 async function refreshMe() {
   const r = await api("/api/me");
@@ -812,7 +814,7 @@ $("#login").addEventListener("submit", async e => {
   try {
     if (SETUP && $("#lPass").value !== $("#lPass2").value) { $("#lMsg").textContent = "The passwords don't match."; return; }
     const body = { username: $("#lUser").value, password: $("#lPass").value };
-    if (SETUP) body.code = $("#lCode").value;
+    if (SETUP && !$("#lCodeRow").hidden) body.code = $("#lCode").value;
     const r = await api(SETUP ? "/api/setup" : "/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     if (r.status === 409 && SETUP) { showLogin(r.json?.error); return; } // someone already finished setup
     if (!r.ok) { $("#lMsg").textContent = r.json?.error || (SETUP ? "Couldn't create the account." : "Sign-in failed."); return; }
@@ -852,7 +854,7 @@ const OURA_RETURN = {
     try { const r = +localStorage.getItem("lifedash.range"); if ([7, 14, 30].includes(r)) { RANGE = r; $("#range").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", +x.dataset.r === r)); } } catch (e) {}
     const ret = new URLSearchParams(location.search).get("oura");
     if (ret) history.replaceState(null, "", location.pathname);
-    if (probe.status === 401) return showLogin(ret && !probe.json.setupRequired ? "Sign in to finish connecting Oura." : "", Boolean(probe.json.setupRequired));
+    if (probe.status === 401) return showLogin(ret && !probe.json.setupRequired ? "Sign in to finish connecting Oura." : "", Boolean(probe.json.setupRequired), Boolean(probe.json.setupCodeRequired));
     await loadServer(probe.json);
     if (ret && OURA_RETURN[ret]) { const m = $("#ouraMsg"); if (m) { m.className = "msg " + OURA_RETURN[ret][0]; m.textContent = OURA_RETURN[ret][1]; } }
     if (ret === "connected" || probe.json.oura.syncing) pollOura();

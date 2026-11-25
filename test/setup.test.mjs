@@ -28,57 +28,48 @@ async function start(env = {}) {
   }
   return { app, logs, call, clearCookie: () => { cookie = ""; } };
 }
-const codeFrom = logs => /setup code: ([A-Z0-9]{4}-[A-Z0-9]{4})/.exec(logs.join("\n"))?.[1];
-
-test("first visit asks for setup; the account is created with the logged code", async () => {
+test("first visit offers setup without a code; the account is created and signed in", async () => {
   const { logs, call, clearCookie } = await start();
-  const code = codeFrom(logs);
-  assert.ok(code, "setup code is printed at startup");
+  assert.match(logs.join("\n"), /No users yet\. Open http:\/\/dash\.test to create your account\.$/m);
 
   const me = await call("GET", "/api/me");
   assert.equal(me.status, 401);
-  assert.equal(me.json.setupRequired, true);
+  assert.deepEqual([me.json.setupRequired, me.json.setupCodeRequired], [true, false]);
 
-  assert.equal((await call("POST", "/api/setup", { username: "dan", password: "correct horse battery", code: "WRONG-CODE" })).status, 403);
-  assert.equal((await call("POST", "/api/setup", { username: "dan smith", password: "correct horse battery", code })).status, 400);
-  const short = await call("POST", "/api/setup", { username: "dan", password: "short", code });
+  assert.equal((await call("POST", "/api/setup", { username: "dan smith", password: "correct horse battery" })).status, 400);
+  const short = await call("POST", "/api/setup", { username: "dan", password: "short" });
   assert.equal(short.status, 400);
   assert.match(short.json.error, /at least 10 characters/);
 
-  // code is accepted in any case and without the dash
-  const ok = await call("POST", "/api/setup", { username: "dan", password: "correct horse battery", code: code.toLowerCase().replace("-", "") });
+  const ok = await call("POST", "/api/setup", { username: "dan", password: "correct horse battery" });
   assert.equal(ok.status, 201);
   assert.equal((await call("GET", "/api/me")).json.user.username, "dan", "setup signs you in");
 
-  const again = await call("POST", "/api/setup", { username: "eve", password: "another long password", code });
-  assert.equal(again.status, 409);
+  assert.equal((await call("POST", "/api/setup", { username: "eve", password: "another long password" })).status, 409);
 
   clearCookie();
   const anon = await call("GET", "/api/me");
-  assert.equal(anon.json.setupRequired, false);
+  assert.deepEqual([anon.json.setupRequired, anon.json.setupCodeRequired], [false, false]);
   assert.equal((await call("POST", "/api/login", { username: "dan", password: "correct horse battery" })).status, 200);
 });
 
-test("SETUP_CODE replaces the generated code and isn't logged", async () => {
+test("an optional SETUP_CODE is required when set, and never logged", async () => {
   const { logs, call } = await start({ SETUP_CODE: "my-own-setup-code" });
-  assert.equal(codeFrom(logs), undefined);
   assert.ok(!logs.join("\n").includes("my-own-setup-code"));
-  assert.match(logs.join("\n"), /SETUP_CODE you configured/);
+  assert.equal((await call("GET", "/api/me")).json.setupCodeRequired, true);
+  assert.equal((await call("POST", "/api/setup", { username: "dan", password: "correct horse battery" })).status, 403);
   assert.equal((await call("POST", "/api/setup", { username: "dan", password: "correct horse battery", code: "MY-OWN-SETUP-CODE" })).status, 201);
 });
 
 test("repeated wrong setup codes are throttled", async () => {
-  const { logs, call } = await start();
-  for (let i = 0; i < 5; i++) assert.equal((await call("POST", "/api/setup", { username: "dan", password: "correct horse battery", code: "AAAA-AAAA" })).status, 403);
-  const r = await call("POST", "/api/setup", { username: "dan", password: "correct horse battery", code: codeFrom(logs) });
-  assert.equal(r.status, 429);
+  const { call } = await start({ SETUP_CODE: "right-code-1234" });
+  for (let i = 0; i < 5; i++) assert.equal((await call("POST", "/api/setup", { username: "dan", password: "correct horse battery", code: "wrong" })).status, 403);
+  assert.equal((await call("POST", "/api/setup", { username: "dan", password: "correct horse battery", code: "right-code-1234" })).status, 429);
 });
 
-test("no setup prompt once a user exists", async () => {
-  const { app, logs, call } = await start();
-  logs.length = 0;
+test("no setup once a user exists", async () => {
+  const { app, call } = await start();
   app.db.prepare("INSERT INTO users (username, password_hash, created_at) VALUES ('x', 'scrypt$1$1$1$AA==$AA==', 0)").run();
-  const me = await call("GET", "/api/me");
-  assert.equal(me.json.setupRequired, false);
-  assert.equal((await call("POST", "/api/setup", { username: "dan", password: "correct horse battery", code: "anything" })).status, 409);
+  assert.equal((await call("GET", "/api/me")).json.setupRequired, false);
+  assert.equal((await call("POST", "/api/setup", { username: "dan", password: "correct horse battery" })).status, 409);
 });
