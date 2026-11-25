@@ -1,0 +1,19 @@
+{
+  // Server, shared code, tests and scripts. Node runs these .ts files directly (type stripping),
+  // so only erasable TypeScript syntax is allowed and imports use .ts extensions.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "noUncheckedIndexedAccess": false,
+    "skipLibCheck": true
+  },
+  "include": ["server", "shared", "test", "scripts"]
+}

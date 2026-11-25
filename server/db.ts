@@ -1,13 +1,34 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import type { DatabaseSync as DatabaseSyncType, SQLInputValue } from "node:sqlite";
 
 // node:sqlite is built into Node 22.13+; silence its one-time "experimental" warning.
 const origEmit = process.emitWarning;
-process.emitWarning = (w, ...a) => (String(w).includes("SQLite is an experimental") ? undefined : origEmit.call(process, w, ...a));
+process.emitWarning = ((warning: string | Error, ...rest: unknown[]) =>
+  String(warning).includes("SQLite is an experimental") ? undefined : (origEmit as (...a: unknown[]) => void).call(process, warning, ...rest)) as typeof process.emitWarning;
 const { DatabaseSync } = await import("node:sqlite");
 process.emitWarning = origEmit;
 
-const MIGRATIONS = [
+export type Db = DatabaseSyncType;
+export type Param = SQLInputValue;
+
+/* Typed query helpers: node:sqlite returns loosely typed rows, so each query states its row type. */
+export const one = <T>(db: Db, sql: string, ...params: Param[]): T | undefined => db.prepare(sql).get(...params) as T | undefined;
+export const all = <T>(db: Db, sql: string, ...params: Param[]): T[] => db.prepare(sql).all(...params) as T[];
+export const run = (db: Db, sql: string, ...params: Param[]) => db.prepare(sql).run(...params);
+
+/* Row shapes */
+export interface UserRow { id: number; username: string; password_hash: string; created_at: number }
+export interface OuraConnectionRow {
+  user_id: number; access_token: string; refresh_token: string | null; expires_at: number | null; scope: string | null;
+  status: "active" | "needs_reauth"; last_sync_at: number | null; last_sync_day: string | null; last_error: string | null; created_at: number;
+}
+export interface MindwtrConnectionRow {
+  user_id: number; url: string; username: string | null; password: string | null; etag: string | null;
+  last_sync_at: number | null; last_error: string | null; created_at: number;
+}
+
+const MIGRATIONS: string[] = [
   `
   CREATE TABLE users (
     id INTEGER PRIMARY KEY,
@@ -146,21 +167,21 @@ const MIGRATIONS = [
   `,
 ];
 
-export function openDb(path) {
+export function openDb(path: string): Db {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-  const version = db.prepare("PRAGMA user_version").get().user_version;
+  const version = one<{ user_version: number }>(db, "PRAGMA user_version")!.user_version;
   for (let v = version; v < MIGRATIONS.length; v++) {
     tx(db, () => { db.exec(MIGRATIONS[v]); db.exec(`PRAGMA user_version = ${v + 1}`); });
   }
   return db;
 }
 
-export function tx(db, fn) {
+export function tx<T>(db: Db, fn: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try { const r = fn(); db.exec("COMMIT"); return r; }
   catch (e) { db.exec("ROLLBACK"); throw e; }
 }
 
-export const now = () => Math.floor(Date.now() / 1000);
+export const now = (): number => Math.floor(Date.now() / 1000);

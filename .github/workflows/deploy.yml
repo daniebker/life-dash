@@ -1,6 +1,6 @@
 name: Deploy
 
-# Tests, checks that the Docker image builds and starts, then sends the source to your server over SSH
+# Type-checks, tests and builds, checks that the Docker image builds and starts, then sends the source to your server over SSH
 # and builds and starts it there with Docker Compose (deploy/compose.yml).
 #
 # Uses the repository's "prod" environment:
@@ -32,7 +32,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
       - run: npm test
+      - run: npm run build
 
   image:
     needs: test

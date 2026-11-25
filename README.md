@@ -3,9 +3,41 @@
 A dashboard for analysing your own life-tracking exports. It runs two ways:
 
 - **With the server** (`npm start`): sign in, upload files into a SQLite database where duplicate records are skipped, and connect Oura so your ring data syncs in the background.
-- **On its own**: open `index.html` from any static host or from disk and drop files on it. Files stay in that browser's `localStorage`.
+- **On its own**: open the built `dist/index.html` from any static host or straight from disk and drop files on it. Files stay in that browser's `localStorage`.
 
 The page detects which mode it's in by checking for the server's `/api/me`.
+
+## Project layout
+
+Everything is TypeScript.
+
+| Folder | What's in it |
+|---|---|
+| `client/` | The dashboard: React, built by Vite into one self-contained `dist/index.html` (scripts and styles inlined). `src/lib/` holds the data model and API client; `src/components/` has one component per panel. |
+| `server/` | The backend: Node's built-in HTTP server and SQLite (`node:sqlite`). Node runs these `.ts` files directly (type stripping), so there's no server build step and no runtime npm dependencies. |
+| `shared/` | File parsers and API types used by both the dashboard and the server. |
+| `test/` | Server tests (`node:test`) against mock Oura and WebDAV services. |
+| `scripts/` | `oura-sync.ts`, a standalone Oura download for static mode. |
+
+## Development
+
+Requires Node.js 22.18 or newer.
+
+```bash
+npm install
+```
+
+```bash
+npm run build      # dashboard -> dist/index.html
+```
+
+```bash
+npm start          # server on http://localhost:8080 (needs .env, see below)
+```
+
+While working on the dashboard, run `npm start` in one terminal and `npm run dev` in another. Then open http://localhost:5173: Vite reloads on every change and passes `/api` calls to the server.
+
+`npm run typecheck` checks both the dashboard and the server, and `npm run check` runs the type-check, the tests and the build together.
 
 ## Views
 
@@ -32,7 +64,7 @@ Files are recognised by their content, not their name. You can add several of th
 | Habits | Binary `HBT1` file (see below). |
 | Activities | Plain text, one activity name per line. |
 | Mindwtr | The `data.json` that the Mindwtr GTD app syncs (tasks, projects, sections, areas). Its `settings` are dropped and never stored, because they can contain API keys. Files encrypted by Mindwtr's sync encryption can't be read. |
-| Oura | JSON written by `scripts/oura-sync.mjs`, or a raw Oura API v2 response (`{"data": [...]}`) from `daily_sleep`, `daily_readiness`, `daily_activity` or `sleep`. |
+| Oura | JSON written by `scripts/oura-sync.ts`, or a raw Oura API v2 response (`{"data": [...]}`) from `daily_sleep`, `daily_readiness`, `daily_activity` or `sleep`. |
 
 ### `HBT1` habits format
 
@@ -48,7 +80,7 @@ Each record is `name[24]` (NUL padded), `u16` daily target at 24, then one byte 
 
 ## Activity groups
 
-Activities are coloured by group. Edit `GROUPS` at the top of the script in `index.html` to change the grouping:
+Activities are coloured by group. Edit `GROUPS` in `client/src/lib/groups.ts` to change the grouping:
 
 - Sleep
 - Work & study: Work, Study, Code
@@ -59,7 +91,7 @@ Activities are coloured by group. Edit `GROUPS` at the top of the script in `ind
 
 ## Static mode: auto-loading files
 
-When served over HTTP (for example `python3 -m http.server`), the page loads the files listed in `data/manifest.json` on first visit:
+When `dist/index.html` is served over HTTP (for example `python3 -m http.server` in `dist/`), the page loads the files listed in `data/manifest.json` next to it on first visit:
 
 ```json
 ["activities.txt", "log.csv", "checkins.csv", "habits.dat"]
@@ -69,12 +101,12 @@ Binary files can also be listed base64-encoded with a `.b64` suffix (e.g. `habit
 
 `data/` is git-ignored so personal data stays out of the repository.
 
-`scripts/oura-sync.mjs` fetches Oura data into `data/oura.json` for static mode (`OURA_TOKEN=... node scripts/oura-sync.mjs --days 60`). The server doesn't need it.
+`scripts/oura-sync.ts` fetches Oura data into `data/oura.json` for static mode (`OURA_TOKEN=... node scripts/oura-sync.ts --days 60`). The server doesn't need it.
 
 
 ## Server
 
-Requires Node.js 22.13 or newer, or Docker (see below). It has no npm dependencies; SQLite comes from Node's built-in `node:sqlite`.
+Requires Node.js 22.18 or newer, or Docker (see below). It has no runtime npm dependencies; SQLite comes from Node's built-in `node:sqlite`. Build the dashboard once with `npm install && npm run build`; the server serves `dist/index.html`.
 
 ```bash
 cp .env.example .env        # then set SECRET_KEY (openssl rand -hex 32) and the Oura values
@@ -133,7 +165,7 @@ After that it re-reads the file in the background on the same schedule as Oura (
 - Passwords are hashed with scrypt. Sessions are random tokens stored as SHA-256 hashes, in an `HttpOnly`, `SameSite=Lax` cookie (`Secure` when `PUBLIC_URL` is https).
 - State-changing API calls require an `X-Life-Dash` header, which cross-site forms can't send.
 - After 5 failed sign-ins from one IP, sign-in is blocked for 15 minutes. Set `TRUST_PROXY=true` behind a reverse proxy so the real client IP is used.
-- Only `index.html` and `parsers.js` are served as files. Everything else is behind the API.
+- Only the built dashboard (`dist/index.html`) is served as a file. Everything else is behind the API.
 - Run it behind HTTPS. Example nginx site:
 
 ```nginx
@@ -157,11 +189,11 @@ server {
 npm test
 ```
 
-This starts the server against a mock Oura service and covers sign-in, the CSRF guard, upload de-duplication for every file kind, the OAuth flow, background backfill, pagination, token refresh and revoked access.
+The tests run the TypeScript directly with Node; there's no build step. They start the server against a mock Oura service and covers sign-in, the CSRF guard, upload de-duplication for every file kind, the OAuth flow, background backfill, pagination, token refresh and revoked access.
 
 ## Docker
 
-The image runs the server as an unprivileged user with the database on a volume at `/data`. To run it from this checkout with Docker Compose:
+The image is built in two stages: the first builds the dashboard, the second holds only the server, the shared code and the built `dist/index.html`. It runs as an unprivileged user with the database on a volume at `/data`. To run it from this checkout with Docker Compose:
 
 ```bash
 cp .env.example .env        # then set SECRET_KEY (openssl rand -hex 32) and, optionally, the Oura values
@@ -171,7 +203,7 @@ cp .env.example .env        # then set SECRET_KEY (openssl rand -hex 32) and, op
 docker compose up -d --build
 ```
 
-Then open http://localhost:8080 and create your account (or use `docker compose exec life-dash node server/cli.mjs add yourname`). Compose refuses to start until `SECRET_KEY` is set. To use another port, set `LIFE_DASH_PORT` in `.env`; if you do, also update `PUBLIC_URL`.
+Then open http://localhost:8080 and create your account (or use `docker compose exec life-dash node server/cli.ts add yourname`). Compose refuses to start until `SECRET_KEY` is set. To use another port, set `LIFE_DASH_PORT` in `.env`; if you do, also update `PUBLIC_URL`.
 
 Other commands:
 - `docker compose logs -f`: follow the server log

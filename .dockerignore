@@ -1,5 +1,8 @@
 *
 !package.json
-!index.html
-!parsers.js
+!package-lock.json
+!tsconfig.json
+!shared/
 !server/
+!client/
+client/node_modules

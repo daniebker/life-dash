@@ -3,28 +3,29 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../server/config.mjs";
-import { createApp } from "../server/app.mjs";
+import { loadConfig } from "../server/config.ts";
+import { createApp, type App } from "../server/app.ts";
+import { type Resp, toResp, fixtureClientDir } from "./helpers.ts";
 
-const dirs = [], apps = [];
+const dirs: string[] = [], apps: App[] = [];
 after(async () => { for (const a of apps) await a.close(); for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 
-async function start(env = {}) {
+async function start(env: Record<string, string> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "life-dash-setup-")); dirs.push(dir);
-  const logs = [];
-  const app = createApp(loadConfig({ DB_PATH: join(dir, "t.db"), SECRET_KEY: "test-secret-key-0123456789", PUBLIC_URL: "http://dash.test", ...env }),
-    { log: { info: m => logs.push(m), warn() {}, error: console.error } });
+  const logs: string[] = [];
+  const app = createApp(loadConfig({ DB_PATH: join(dir, "t.db"), SECRET_KEY: "test-secret-key-0123456789", PUBLIC_URL: "http://dash.test", CLIENT_DIR: fixtureClientDir(), ...env }),
+    { log: { info: (m: unknown) => { logs.push(String(m)); }, warn() {}, error: console.error } });
   apps.push(app);
   const { port } = await app.listen(0, "127.0.0.1");
   const base = `http://127.0.0.1:${port}`;
   let cookie = "";
-  async function call(method, path, body) {
-    const headers = { "X-Life-Dash": "1" };
+  async function call(method: string, path: string, body?: object): Promise<Resp> {
+    const headers: Record<string, string> = { "X-Life-Dash": "1" };
     if (cookie) headers.Cookie = cookie;
     if (body) headers["Content-Type"] = "application/json";
     const res = await fetch(base + path, { method, headers, body: body && JSON.stringify(body) });
     const sc = res.headers.get("set-cookie"); if (sc) cookie = sc.split(";")[0];
-    return { status: res.status, json: await res.json().catch(() => null) };
+    return toResp(res);
   }
   return { app, logs, call, clearCookie: () => { cookie = ""; } };
 }
