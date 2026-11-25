@@ -1,0 +1,31 @@
+{
+  "name": "life-dash",
+  "private": true,
+  "type": "module",
+  "description": "Personal life-tracking dashboard: React + TypeScript front end, Node + SQLite backend with login, Oura and Mindwtr sync.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "vite --config client/vite.config.ts",
+    "build": "vite build --config client/vite.config.ts",
+    "start": "node --env-file-if-exists=.env server/server.ts",
+    "user": "node --env-file-if-exists=.env server/cli.ts",
+    "typecheck": "tsc -p tsconfig.json && tsc -p client/tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "~5.9.3",
+    "vite": "^6.3.5",
+    "vite-plugin-singlefile": "^2.3.0"
+  }
+}

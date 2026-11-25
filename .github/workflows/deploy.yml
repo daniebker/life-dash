@@ -1,0 +1,132 @@
+name: Deploy
+
+# Type-checks, tests and builds, checks that the Docker image builds and starts, then sends the source to your server over SSH
+# and builds and starts it there with Docker Compose (deploy/compose.yml).
+#
+# Uses the repository's "prod" environment:
+#   VPS_HOST, VPS_PORT, VPS_USER   server address and SSH user (a user allowed to run docker)
+#   VPS_SSH_KEY                    private SSH key for VPS_USER
+#   VPS_KNOWN_HOSTS                (optional, recommended) output of `ssh-keyscan -p <port> <host>`;
+#                                  without it the host key is fetched at deploy time and trusted as-is
+#   DEPLOY_PATH                    (optional variable) folder on the server, default ~/life-dash
+#
+# The server keeps <DEPLOY_PATH>/life-dash.env and the life-dash-data volume; a deploy never touches them.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t life-dash:smoke .
+
+      - name: Smoke test
+        run: |
+          docker run -d --name smoke -e SECRET_KEY=smoke-test-secret-0123456789 -p 127.0.0.1:8080:8080 life-dash:smoke
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/ | grep -q '<title>Life Dash</title>'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/me)" = 401
+          docker logs smoke
+          docker rm -f smoke
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST || vars.VPS_HOST }}
+      VPS_PORT: ${{ secrets.VPS_PORT || vars.VPS_PORT || '22' }}
+      VPS_USER: ${{ secrets.VPS_USER || vars.VPS_USER }}
+      DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'life-dash' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          for v in VPS_HOST VPS_USER VPS_SSH_KEY; do
+            [ -n "${!v}" ] || { echo "::error::$v is not set in the prod environment"; exit 1; }
+          done
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          if [ -n "$VPS_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "::warning::VPS_KNOWN_HOSTS is not set, so the server's host key is trusted without verification. Add it to the prod environment (ssh-keyscan -p $VPS_PORT $VPS_HOST)."
+            ssh-keyscan -p "$VPS_PORT" "$VPS_HOST" > ~/.ssh/known_hosts 2>/dev/null
+            [ -s ~/.ssh/known_hosts ] || { echo "::error::Couldn't reach $VPS_HOST:$VPS_PORT"; exit 1; }
+          fi
+          chmod 644 ~/.ssh/known_hosts
+          {
+            echo "Host target"
+            echo "  HostName $VPS_HOST"
+            echo "  User $VPS_USER"
+            echo "  Port $VPS_PORT"
+            echo "  IdentityFile ~/.ssh/deploy_key"
+            echo "  StrictHostKeyChecking yes"
+            echo "  BatchMode yes"
+          } > ~/.ssh/config
+
+      - name: Upload source
+        run: |
+          ssh target "mkdir -p '$DEPLOY_PATH' && test -f '$DEPLOY_PATH/life-dash.env'" \
+            || { echo "::error::$DEPLOY_PATH/life-dash.env is missing on the server. Create it from .env.example first."; exit 1; }
+          # tracked files of this commit only, unpacked next to the running copy
+          git archive --format=tar HEAD \
+            | ssh target "rm -rf '$DEPLOY_PATH/app.new' && mkdir -p '$DEPLOY_PATH/app.new' && tar -x -C '$DEPLOY_PATH/app.new' \
+                && printf 'LIFE_DASH_ENV_FILE=../../life-dash.env\n' > '$DEPLOY_PATH/app.new/deploy/.env' \
+                && { grep '^LIFE_DASH_PORT=' '$DEPLOY_PATH/life-dash.env' >> '$DEPLOY_PATH/app.new/deploy/.env' || true; } \
+                && echo '$GITHUB_SHA' > '$DEPLOY_PATH/app.new/REVISION'"
+
+      - name: Build and start
+        run: |
+          # Build from the new source first; the running container keeps serving until the build succeeds.
+          ssh target "cd '$DEPLOY_PATH/app.new/deploy' && docker compose build --pull"
+          ssh target "cd '$DEPLOY_PATH' && rm -rf app.old && { [ ! -d app ] || mv app app.old; } && mv app.new app \
+            && cd app/deploy && docker compose up -d --remove-orphans && docker image prune -f >/dev/null"
+          echo "Deployed $GITHUB_SHA"
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            state=$(ssh target "cd '$DEPLOY_PATH/app/deploy' && docker inspect --format '{{.State.Health.Status}}' \$(docker compose ps -q life-dash)")
+            echo "health: $state"
+            [ "$state" = healthy ] && exit 0
+            [ "$state" = unhealthy ] && break
+            sleep 3
+          done
+          ssh target "cd '$DEPLOY_PATH/app/deploy' && docker compose logs --tail 50 life-dash"
+          echo "::error::The new version didn't become healthy. The previous source is in $DEPLOY_PATH/app.old."
+          exit 1
