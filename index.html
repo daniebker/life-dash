@@ -148,6 +148,14 @@ header.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; j
 .hm td.stat { font: 11px var(--f-mono); color: var(--ink-2); padding-left: 8px; white-space: nowrap; text-align: right; }
 .hm td.cell.hit { box-shadow: inset 0 0 0 1.5px var(--ink); }
 
+/* oura */
+.ochart { position: relative; }
+.ochart svg { display: block; width: 100%; overflow: visible; }
+.ochart text { font: 10px var(--f-mono); fill: var(--ink-3); }
+.ochart .dl { font: 500 11px var(--f-body); fill: var(--ink-2); }
+.ochart .hit { fill: transparent; }
+.ochart .hit:hover { fill: var(--accent-wash); }
+.cols.steps .c { background: var(--g-care); }
 /* mood */
 .moodlist { display: grid; gap: 6px; }
 .mrow { display: grid; grid-template-columns: 96px 1fr; gap: 10px; font-size: 13px; align-items: baseline; }
@@ -194,8 +202,8 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
 
   <div class="drop" id="drop">
     <label class="btn" for="file">Add data files</label>
-    <input id="file" type="file" multiple accept=".csv,.txt,.dat,text/csv,text/plain,application/octet-stream">
-    <span class="sub">or drop them here. Time log (.csv), check-ins (.csv), habits (.dat) and activity list (.txt) are detected automatically. Files stay in this browser.</span>
+    <input id="file" type="file" multiple accept=".csv,.txt,.dat,.json,text/csv,text/plain,application/octet-stream">
+    <span class="sub">or drop them here. Time log (.csv), check-ins (.csv), habits (.dat), activity list (.txt) and Oura data (.json) are detected automatically. Files stay in this browser.</span>
     <div class="chips" id="chips"></div>
   </div>
 
@@ -220,6 +228,11 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
       <div id="sleep"></div>
     </section>
   </div>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Oura</h2><span class="sub" id="ouraSub"></span></div>
+    <div id="oura"></div>
+  </section>
 
   <section class="panel">
     <div class="panel-head"><h2>Habits</h2><span class="sub" id="habitSub"></span></div>
@@ -291,6 +304,10 @@ function detect(name, buf) {
   const head = new Uint8Array(buf.slice(0, 4));
   if (String.fromCharCode(...head) === "HBT1") return "habits";
   const text = new TextDecoder().decode(buf.slice(0, 2000));
+  if (/^\s*[{[]/.test(text)) {
+    try { const j = JSON.parse(new TextDecoder().decode(buf)); if (ouraCollections(j)) return "oura"; } catch (e) { /* not JSON */ }
+    return null;
+  }
   if (/^\s*start_ts\s*,\s*end_ts/i.test(text) || /start\s*,\s*end\s*,\s*activity/i.test(text)) return "log";
   if (/^\d{4}-\d\d-\d\d \d\d:\d\d,[A-Za-z]/m.test(text)) return "checkins";
   if (!/,/.test(text) && /^[\w &/-]+$/m.test(text)) return "activities";
@@ -346,6 +363,26 @@ function parseHabits(buf, year) {
   return out;
 }
 
+/* Oura: our sync format {source:"oura", daily_sleep:[], daily_readiness:[], daily_activity:[], sleep:[]}
+   or a raw API response {data:[...]}, whose rows are classified by their fields. */
+const OURA_KEYS = ["daily_sleep", "daily_readiness", "daily_activity", "sleep"];
+function classifyOuraRow(r) {
+  if (!r || typeof r !== "object" || !r.day) return null;
+  if ("bedtime_start" in r) return "sleep";
+  if ("steps" in r || "active_calories" in r) return "daily_activity";
+  if ("temperature_deviation" in r || (r.contributors && "hrv_balance" in r.contributors)) return "daily_readiness";
+  if (r.contributors && ("deep_sleep" in r.contributors || "rem_sleep" in r.contributors)) return "daily_sleep";
+  return null;
+}
+function ouraCollections(j) {
+  if (!j || typeof j !== "object") return null;
+  const out = {}; let n = 0;
+  OURA_KEYS.forEach(k => { if (Array.isArray(j[k])) { out[k] = j[k]; n += j[k].length + 1; } });
+  if (Array.isArray(j.data)) j.data.forEach(r => { const k = classifyOuraRow(r); if (k) { (out[k] ||= []).push(r); n++; } });
+  return n ? out : null;
+}
+const wallClock = s => typeof s === "string" ? naive(s.slice(0, 19)) : NaN; // keep the ring's local time, drop the offset
+
 /* ---------- storage ---------- */
 let FILES = []; // {name, kind, data (text or b64), year?}
 function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(FILES)); } catch (e) { /* storage unavailable: keep in memory */ } }
@@ -366,10 +403,24 @@ async function addFile(name, buf, lastModified) {
 let M = null;
 function buildModel() {
   const logMap = new Map(), chkMap = new Map(); let habits = []; const acts = new Set();
+  const oDays = {}, oSleep = new Map();
+  const od = day => (oDays[day] ||= { day });
   for (const f of FILES) {
     try {
       if (f.kind === "log") parseLog(f.data).forEach(r => logMap.set(r.s + "|" + r.act, r));
       else if (f.kind === "checkins") parseCheckins(f.data).forEach(c => chkMap.set(c.t + c.core + c.mid + c.leaf, c));
+      else if (f.kind === "oura") {
+        const c = ouraCollections(JSON.parse(f.data)) || {};
+        (c.daily_sleep || []).forEach(r => { if (r.score != null) od(r.day).sleepScore = r.score; });
+        (c.daily_readiness || []).forEach(r => { const d = od(r.day); if (r.score != null) d.readiness = r.score; if (r.temperature_deviation != null) d.temp = r.temperature_deviation; });
+        (c.daily_activity || []).forEach(r => { const d = od(r.day); if (r.score != null) d.activity = r.score; if (r.steps != null) d.steps = r.steps; if (r.active_calories != null) d.kcal = r.active_calories; });
+        (c.sleep || []).forEach(r => {
+          if (r.type && r.type !== "long_sleep") return; // ignore naps and rests
+          const s = { day: r.day, start: wallClock(r.bedtime_start), end: wallClock(r.bedtime_end), asleep: r.total_sleep_duration, inBed: r.time_in_bed,
+            eff: r.efficiency, hrv: r.average_hrv, low: r.lowest_heart_rate, deep: r.deep_sleep_duration, rem: r.rem_sleep_duration };
+          const prev = oSleep.get(r.day); if (!prev || (s.asleep || 0) > (prev.asleep || 0)) oSleep.set(r.day, s);
+        });
+      }
       else if (f.kind === "activities") f.data.split(/\r?\n/).map(s => s.trim()).filter(Boolean).forEach(a => acts.add(a));
       else if (f.kind === "habits") {
         for (const h of parseHabits(b64dec(f.data), f.year)) {
@@ -387,8 +438,9 @@ function buildModel() {
   log.forEach(r => { ts.push(r.s, r.e - 1); });
   checkins.forEach(c => ts.push(c.t));
   habits.forEach(h => Object.keys(h.days).forEach(k => ts.push(naive(k + " 12:00"))));
+  Object.keys(oDays).concat([...oSleep.keys()]).forEach(k => ts.push(naive(k + " 12:00")));
   const first = ts.length ? dayStart(Math.min(...ts)) : null, last = ts.length ? dayStart(Math.max(...ts)) : null;
-  M = { log, checkins, habits, acts: [...acts], first, last };
+  M = { log, checkins, habits, acts: [...acts], first, last, oura: { days: oDays, sleep: oSleep, any: Object.keys(oDays).length + oSleep.size > 0 } };
 }
 
 /* ---------- rendering ---------- */
@@ -425,6 +477,7 @@ function render() {
   renderLedger(days, chk);
   renderTime(byAct, days);
   renderSleep(sleeps);
+  renderOura(days);
   renderHabits(days);
   renderMood(chk);
   renderLogTable(lo, hi);
@@ -452,6 +505,11 @@ function renderKPIs(days, byAct, perDayAct, sleeps, chk) {
   if (total) {
     const awake = total - (byAct.Sleep || 0), other = byAct.Other || 0;
     tiles.push(["Tracked", Math.round(100 * (awake - other) / awake) + "%", "of waking time", `${fmtH(other)} logged as Other`]);
+  }
+  const oR = days.map(d => M.oura.days[dkey(d)]?.readiness).filter(v => v != null);
+  if (oR.length) {
+    const oS = days.map(d => M.oura.sleep.get(dkey(d))?.asleep).filter(v => v != null);
+    tiles.push(["Readiness", Math.round(oR.reduce((a, b) => a + b, 0) / oR.length), "avg Oura score", oS.length ? `${fmtHM(oS.reduce((a, b) => a + b, 0) / oS.length)} actual sleep per night` : `${oR.length} days`]);
   }
   const hs = habitStats(days);
   if (hs.possible) tiles.push(["Habits", Math.round(100 * hs.hit / hs.possible) + "%", "targets met", `${hs.hit} of ${hs.possible} habit-days`]);
@@ -514,6 +572,74 @@ function renderSleep(sleeps) {
   const step = Math.ceil(sleeps.length / 14);
   const xl = sleeps.map((r, i) => `<span>${i % step === 0 ? new Date(r.e * 1000).getUTCDate() : ""}</span>`).join("");
   $("#sleep").innerHTML = `<div class="cols">${grid}${cols}</div><div class="xlabels">${xl}</div><div class="note">Dashed line is 8 hours. Bars are labelled by the morning you woke up.</div>`;
+}
+
+const OURA_SERIES = [
+  { k: "sleepScore", name: "Sleep", v: "--g-sleep" },
+  { k: "readiness", name: "Readiness", v: "--g-work" },
+  { k: "activity", name: "Activity", v: "--g-care" },
+];
+function renderOura(days) {
+  const el = $("#oura");
+  if (!M.oura.any) {
+    $("#ouraSub").textContent = "";
+    el.innerHTML = `<div class="empty">No Oura data yet. Run <code>scripts/oura-sync.mjs</code> with your Oura token, or drop an <code>oura.json</code> here.</div>`;
+    return;
+  }
+  const ks = days.map(dkey), rows = ks.map(k => M.oura.days[k] || {});
+  const scored = rows.filter(r => OURA_SERIES.some(s => r[s.k] != null)).length;
+  $("#ouraSub").textContent = `${scored} of ${ks.length} days with scores`;
+
+  // scores: one 0-100 scale, three lines, direct labels at the right end
+  const W = Math.max(280, el.clientWidth || 600), H = 170, L = 26, R = 92, T = 8, B = 20;
+  const vals = rows.flatMap(r => OURA_SERIES.map(s => r[s.k])).filter(v => v != null);
+  const lo = vals.length ? Math.min(50, Math.floor((Math.min(...vals) - 5) / 10) * 10) : 50;
+  const x = i => L + (ks.length > 1 ? i / (ks.length - 1) : .5) * (W - L - R);
+  const y = v => T + (100 - v) / (100 - lo) * (H - T - B);
+  let svg = "";
+  for (let g = lo; g <= 100; g += 10) svg += `<line x1="${L}" x2="${W - R}" y1="${y(g)}" y2="${y(g)}" stroke="var(--line)"/><text x="${L - 6}" y="${y(g) + 3}" text-anchor="end">${g}</text>`;
+  const step = Math.ceil(ks.length / 10);
+  ks.forEach((k, i) => { if (i % step === 0 || i === ks.length - 1) svg += `<text x="${x(i)}" y="${H - 4}" text-anchor="middle">${+k.slice(8)}</text>`; });
+  const ends = [];
+  OURA_SERIES.forEach(s => {
+    let d = "", pen = false, last = null;
+    rows.forEach((r, i) => { const v = r[s.k]; if (v == null) { pen = false; return; } d += `${pen ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`; pen = true; last = { i, v }; });
+    if (!d) return;
+    svg += `<path d="${d}" fill="none" stroke="var(${s.v})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    rows.forEach((r, i) => { const v = r[s.k]; const p = rows[i - 1]?.[s.k], n = rows[i + 1]?.[s.k]; if (v != null && p == null && n == null) svg += `<circle cx="${x(i)}" cy="${y(v)}" r="3" fill="var(${s.v})"/>`; });
+    svg += `<circle cx="${x(last.i)}" cy="${y(last.v)}" r="4" fill="var(${s.v})" stroke="var(--panel)" stroke-width="2"/>`;
+    ends.push({ s, last, ly: y(last.v) });
+  });
+  ends.sort((a, b) => a.ly - b.ly);
+  ends.forEach((e, i) => { if (i && e.ly - ends[i - 1].ly < 13) e.ly = ends[i - 1].ly + 13; });
+  ends.forEach(e => svg += `<text class="dl" x="${W - R + 10}" y="${e.ly + 4}">${e.s.name} ${e.last.v}</text>`);
+  const cw = (W - L - R) / Math.max(1, ks.length - 1);
+  ks.forEach((k, i) => {
+    const r = rows[i], lines = OURA_SERIES.map(s => `${s.name}: ${r[s.k] ?? "–"}`).join("<br>");
+    svg += `<rect class="hit" x="${x(i) - cw / 2}" y="${T}" width="${cw}" height="${H - T - B}" ${tipAttr(`<b>${fmtDate(days[i])}</b><br>${lines}`)}/>`;
+  });
+  const legend = `<div class="legend">${OURA_SERIES.map(s => `<span><i class="sw" style="background:var(${s.v})"></i>${s.name} score</span>`).join("")}</div>`;
+  let html = `${legend}<div class="ochart"><svg viewBox="0 0 ${W} ${H}" height="${H}" role="img" aria-label="Oura sleep, readiness and activity scores per day">${svg}</svg></div>`;
+
+  // steps
+  const steps = rows.map(r => r.steps), have = steps.filter(v => v != null);
+  if (have.length) {
+    const top = Math.ceil(Math.max(10000, ...have) / 5000) * 5000;
+    const grid = [0, 5000, 10000].map(v => `<div class="gl${v === 10000 ? " target" : ""}" style="bottom:${v / top * 100}%"><span>${v / 1000}k</span></div>`).join("");
+    const cols = rows.map((r, i) => `<div class="c" style="height:${(r.steps || 0) / top * 100}%" ${tipAttr(`<b>${r.steps != null ? r.steps.toLocaleString("en-GB") : "No data"}</b> steps · ${fmtDate(days[i])}${r.kcal != null ? `<br>${r.kcal} active kcal` : ""}`)}></div>`).join("");
+    const xl = ks.map((k, i) => `<span>${i % step === 0 ? +k.slice(8) : ""}</span>`).join("");
+    html += `<div class="panel-head"><span class="eyebrow">Steps</span><span class="sub">${Math.round(have.reduce((a, b) => a + b, 0) / have.length).toLocaleString("en-GB")} per day · dashed line is 10k</span></div><div class="cols steps" style="height:110px">${grid}${cols}</div><div class="xlabels">${xl}</div>`;
+  }
+
+  // nights: what the ring measured next to what was logged
+  const nights = ks.map((k, i) => ({ k, d: days[i], o: M.oura.sleep.get(k), logged: M.log.filter(r => r.act === "Sleep" && dayStart(r.e) === days[i]).reduce((a, r) => a + r.e - r.s, 0) })).filter(n => n.o).reverse();
+  if (nights.length) {
+    const c = (v, f) => v != null && !Number.isNaN(v) ? f(v) : "–";
+    html += `<div class="tablewrap"><table class="data"><thead><tr><th>Night into</th><th>Bed → wake</th><th>Asleep</th><th>In bed</th><th>Logged</th><th>Efficiency</th><th>Deep</th><th>REM</th><th>Avg HRV</th><th>Lowest HR</th><th>Temp</th></tr></thead><tbody>` +
+      nights.map(n => { const o = n.o, t = M.oura.days[n.k]?.temp; return `<tr><td>${fmtDate(n.d)}</td><td class="num">${isNaN(o.start) ? "–" : fmtClock(o.start) + " → " + fmtClock(o.end)}</td><td class="num">${c(o.asleep, fmtHM)}</td><td class="num">${c(o.inBed, fmtHM)}</td><td class="num">${n.logged ? fmtHM(n.logged) : "–"}</td><td class="num">${c(o.eff, v => v + "%")}</td><td class="num">${c(o.deep, fmtHM)}</td><td class="num">${c(o.rem, fmtHM)}</td><td class="num">${c(o.hrv, v => Math.round(v) + " ms")}</td><td class="num">${c(o.low, v => v + " bpm")}</td><td class="num">${c(t, v => (v > 0 ? "+" : "") + v.toFixed(1) + "°")}</td></tr>`; }).join("") +
+      `</tbody></table></div><div class="note">“Logged” is the Sleep entry in your time log ending that morning, for comparison with what the ring measured.</div>`;
+  }
+  el.innerHTML = html;
 }
 
 function habitStats(days) {
@@ -601,6 +727,7 @@ document.addEventListener("click", e => {
   const rm = e.target.closest("[data-rm]"); if (rm) { FILES.splice(+rm.dataset.rm, 1); save(); render(); }
 });
 document.addEventListener("scroll", () => tip.hidden = true, { passive: true });
+let rsz; addEventListener("resize", () => { clearTimeout(rsz); rsz = setTimeout(() => M && renderOura(rangeDays()), 150); });
 $("#range").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
   RANGE = +b.dataset.r;
