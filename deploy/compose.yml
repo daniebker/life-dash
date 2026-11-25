@@ -1,0 +1,28 @@
+# Runs Life Dash on the server. The deploy workflow copies this file to DEPLOY_PATH and starts the
+# image it just built, by digest. To run it by hand: docker compose up -d (uses the "latest" tag).
+#
+# Put settings in life-dash.env next to this file (see .env.example). HOST and DB_PATH are set here.
+services:
+  life-dash:
+    image: ${LIFE_DASH_IMAGE:-ghcr.io/daniebker/life-dash:latest}
+    restart: unless-stopped
+    env_file: life-dash.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      DB_PATH: /data/life-dash.db
+    ports:
+      # only reachable from the server itself; put a reverse proxy with HTTPS in front
+      - "127.0.0.1:${LIFE_DASH_PORT:-8080}:8080"
+    volumes:
+      - life-dash-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  life-dash-data:

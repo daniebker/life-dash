@@ -72,7 +72,7 @@ Binary files can also be listed base64-encoded with a `.b64` suffix (e.g. `habit
 
 ## Server
 
-Requires Node.js 22.13 or newer. It has no npm dependencies; SQLite comes from Node's built-in `node:sqlite`.
+Requires Node.js 22.13 or newer, or Docker (see below). It has no npm dependencies; SQLite comes from Node's built-in `node:sqlite`.
 
 ```bash
 cp .env.example .env        # then set SECRET_KEY (openssl rand -hex 32) and the Oura values
@@ -140,45 +140,83 @@ npm test
 
 This starts the server against a mock Oura service and covers sign-in, the CSRF guard, upload de-duplication for every file kind, the OAuth flow, background backfill, pagination, token refresh and revoked access.
 
+## Docker
+
+The image runs the server as an unprivileged user with the database on a volume at `/data`. To run it locally:
+
+```bash
+docker build -t life-dash .
+```
+
+```bash
+docker run -d --name life-dash -p 127.0.0.1:8080:8080 -v life-dash-data:/data --env-file .env life-dash
+```
+
+```bash
+docker exec -it life-dash node server/cli.mjs add yourname
+```
+
 ## Deploying to a server
 
-`.github/workflows/deploy.yml` runs the tests, then copies the app to your server over SSH with rsync on every push to `main` (or when run manually). It then runs `RESTART_COMMAND` if you set one. The server's `.env`, `var/` and `data/` are never overwritten or deleted.
+`.github/workflows/deploy.yml` runs on every push to `main`, or when run manually:
 
-**One-time server setup** (example for a Debian/Ubuntu host with Node 22):
+1. Runs the tests.
+2. Builds the image, starts it once to check `/healthz`, sign-in protection and the page, then pushes it to `ghcr.io/daniebker/life-dash`, tagged `latest` and `sha-<commit>`.
+3. Connects to your server over SSH, copies `deploy/compose.yml` there, pulls the image by its exact digest and restarts the container with Docker Compose.
+4. Waits for the container to report healthy, and prints its logs if it doesn't.
 
-```bash
-sudo useradd --system --home /srv/life-dash lifedash
-sudo mkdir -p /srv/life-dash && sudo chown deploy:lifedash /srv/life-dash
-sudo cp .env.example /etc/life-dash.env && sudo chmod 640 /etc/life-dash.env && sudo chown root:lifedash /etc/life-dash.env
-# edit /etc/life-dash.env: SECRET_KEY, PUBLIC_URL, DB_PATH=/var/lib/life-dash/life-dash.db, TRUST_PROXY=true, Oura values
-```
+The server's `life-dash.env` and the `life-dash-data` volume (your database) are never touched by a deploy.
 
-After the first deploy, install the service and create your account:
+### GitHub settings
 
-```bash
-sudo cp /srv/life-dash/deploy/life-dash.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now life-dash
-```
-
-```bash
-sudo -u lifedash node --env-file=/etc/life-dash.env /srv/life-dash/server/cli.mjs add yourname
-```
-
-To let the deploy user restart the service, add a sudoers rule with `sudo visudo -f /etc/sudoers.d/life-dash`:
-
-```
-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart life-dash
-```
-
-**GitHub settings** (Settings → Secrets and variables → Actions):
+Create an environment named `prod` in this repository (Settings → Environments). Environments belong to one repository, so if these values are set up in another repository, add them here too.
 
 | Name | Kind | Value |
 |---|---|---|
-| `SSH_PRIVATE_KEY` | secret | Private key of the deploy user, with its public key in that user's `~/.ssh/authorized_keys` |
-| `SSH_KNOWN_HOSTS` | secret | Output of `ssh-keyscan -p 22 your.server` (host keys are always checked) |
-| `SSH_HOST` | variable | Server hostname |
-| `SSH_USER` | variable | Deploy user |
-| `DEPLOY_PATH` | variable | e.g. `/srv/life-dash` |
-| `SSH_PORT` | variable | Optional, default `22` |
-| `RESTART_COMMAND` | variable | Optional, e.g. `sudo systemctl restart life-dash` |
+| `VPS_HOST` | secret | Server hostname or IP |
+| `VPS_PORT` | secret | SSH port, e.g. `22` |
+| `VPS_USER` | secret | SSH user that can run `docker` |
+| `VPS_SSH_KEY` | secret | Private key for that user |
+| `GHCR_PAT` | secret | Personal access token (classic) with `read:packages`, which the server uses to pull the image |
+| `VPS_KNOWN_HOSTS` | secret | Optional but recommended: output of `ssh-keyscan -p <port> <host>` |
+| `DEPLOY_PATH` | variable | Optional folder on the server, default `life-dash` in the SSH user's home |
 
-The deploy job uses a `production` environment, so you can add required reviewers or keep the secrets there.
+Without `VPS_KNOWN_HOSTS`, each deploy fetches the server's SSH host key and trusts it without checking. The run shows a warning when that happens.
+
+The image is pushed with the workflow's own token, so no extra secret is needed for that. The first push creates the package as private and links it to this repository.
+
+### One-time server setup
+
+The server needs Docker with the Compose plugin. As the SSH user:
+
+```bash
+mkdir -p ~/life-dash
+```
+
+Copy this repository's `.env.example` to `~/life-dash/life-dash.env` on the server (for example with `scp`), then edit it:
+- set `SECRET_KEY` (from `openssl rand -hex 32`)
+- set `PUBLIC_URL` to the address you'll use, e.g. `https://dash.example.com`
+- set `TRUST_PROXY=true`
+- add the Oura values
+
+The first deploy fails with a clear message if this file is missing.
+
+After the first deploy, create your account:
+
+```bash
+cd ~/life-dash && docker compose exec life-dash node server/cli.mjs add yourname
+```
+
+The container listens on `127.0.0.1:8080` only. Put a reverse proxy with HTTPS in front of it (see the nginx example above). To use another port, set `LIFE_DASH_PORT` in the shell or in a `.env` file next to `compose.yml`.
+
+To run commands by hand, use `cd ~/life-dash`, then `docker compose ps`, `docker compose logs -f` or `docker compose pull && docker compose up -d`. Run by hand, these use the `latest` tag.
+
+**Backups:** the database is a single SQLite file in the `life-dash-data` volume. For example:
+
+```bash
+docker compose exec life-dash node -e "new (require('node:sqlite').DatabaseSync)('/data/life-dash.db').exec(\"VACUUM INTO '/data/backup.db'\")"
+```
+
+```bash
+docker compose cp life-dash:/data/backup.db ./backup.db
+```
