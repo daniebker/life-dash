@@ -1,0 +1,33 @@
+# Run Life Dash from this checkout: docker compose up -d --build
+# Settings come from .env (copy .env.example). HOST, PORT and DB_PATH are fixed below for the container.
+# The server uses deploy/compose.yml instead, which runs the published image from ghcr.io.
+name: life-dash
+
+services:
+  life-dash:
+    build: .
+    image: life-dash:local
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env (generate one with openssl rand -hex 32)}
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
+      HOST: 0.0.0.0
+      PORT: "8080"
+      DB_PATH: /data/life-dash.db
+    ports:
+      - "127.0.0.1:${LIFE_DASH_PORT:-8080}:8080"
+    volumes:
+      - life-dash-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  life-dash-data:

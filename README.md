@@ -142,19 +142,30 @@ This starts the server against a mock Oura service and covers sign-in, the CSRF 
 
 ## Docker
 
-The image runs the server as an unprivileged user with the database on a volume at `/data`. To run it locally:
+The image runs the server as an unprivileged user with the database on a volume at `/data`. To run it from this checkout with Docker Compose:
 
 ```bash
-docker build -t life-dash .
+cp .env.example .env        # then set SECRET_KEY (openssl rand -hex 32) and, optionally, the Oura values
 ```
 
 ```bash
-docker run -d --name life-dash -p 127.0.0.1:8080:8080 -v life-dash-data:/data --env-file .env life-dash
+docker compose up -d --build
 ```
 
 ```bash
-docker exec -it life-dash node server/cli.mjs add yourname
+docker compose exec life-dash node server/cli.mjs add yourname
 ```
+
+Then open http://localhost:8080. Compose refuses to start until `SECRET_KEY` is set. To use another port, set `LIFE_DASH_PORT` in `.env`; if you do, also update `PUBLIC_URL`.
+
+Other commands:
+- `docker compose logs -f`: follow the server log
+- `docker compose down`: stop it; your data stays in the `life-dash-data` volume
+- `docker compose down -v`: stop it and delete the data
+
+There are two compose files:
+- **`compose.yml`** (this one) builds from source.
+- **`deploy/compose.yml`** is what the deploy workflow puts on your server; it runs the published image from ghcr.io instead.
 
 ## Deploying to a server
 
