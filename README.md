@@ -165,18 +165,30 @@ Other commands:
 
 There are two compose files:
 - **`compose.yml`** (this one) builds from source.
-- **`deploy/compose.yml`** is what the deploy workflow puts on your server; it runs the published image from ghcr.io instead.
+- **`deploy/compose.yml`** is what the deploy workflow uses on your server. It builds the same Dockerfile (`context: ..`), but reads settings from the server's `life-dash.env`.
 
 ## Deploying to a server
 
 `.github/workflows/deploy.yml` runs on every push to `main`, or when run manually:
 
 1. Runs the tests.
-2. Builds the image, starts it once to check `/healthz`, sign-in protection and the page, then pushes it to `ghcr.io/daniebker/life-dash`, tagged `latest` and `sha-<commit>`.
-3. Connects to your server over SSH, copies `deploy/compose.yml` there, pulls the image by its exact digest and restarts the container with Docker Compose.
-4. Waits for the container to report healthy, and prints its logs if it doesn't.
+2. Builds the Docker image in CI and starts it once to check `/healthz`, sign-in protection and the page.
+3. Sends the commit's source to your server over SSH (`git archive`, tracked files only) into `<DEPLOY_PATH>/app.new`.
+4. Builds the image on the server with `deploy/compose.yml`. The running container keeps serving while this happens, so a failed build changes nothing.
+5. Swaps `app.new` into `app`, keeping the previous version in `app.old`, and restarts the container.
+6. Waits for the container to report healthy, and prints its logs if it doesn't.
 
-The server's `life-dash.env` and the `life-dash-data` volume (your database) are never touched by a deploy.
+The server's `life-dash.env` and the `life-dash-data` volume (your database) are never touched by a deploy. Nothing is pushed to a registry; the image only exists on your server.
+
+Server layout:
+
+```
+~/life-dash/
+  life-dash.env        your settings
+  app/                 source of the deployed commit (app/REVISION holds the commit id)
+  app/deploy/.env      written by the deploy; tells compose where life-dash.env is
+  app.old/             the previous version
+```
 
 ### GitHub settings
 
@@ -188,17 +200,14 @@ Create an environment named `prod` in this repository (Settings → Environments
 | `VPS_PORT` | secret | SSH port, e.g. `22` |
 | `VPS_USER` | secret | SSH user that can run `docker` |
 | `VPS_SSH_KEY` | secret | Private key for that user |
-| `GHCR_PAT` | secret | Personal access token (classic) with `read:packages`, which the server uses to pull the image |
 | `VPS_KNOWN_HOSTS` | secret | Optional but recommended: output of `ssh-keyscan -p <port> <host>` |
 | `DEPLOY_PATH` | variable | Optional folder on the server, default `life-dash` in the SSH user's home |
 
 Without `VPS_KNOWN_HOSTS`, each deploy fetches the server's SSH host key and trusts it without checking. The run shows a warning when that happens.
 
-The image is pushed with the workflow's own token, so no extra secret is needed for that. The first push creates the package as private and links it to this repository.
-
 ### One-time server setup
 
-The server needs Docker with the Compose plugin. As the SSH user:
+The server needs Docker with the Compose plugin (and `tar`, which every Linux server has). As the SSH user:
 
 ```bash
 mkdir -p ~/life-dash
@@ -215,14 +224,24 @@ The first deploy fails with a clear message if this file is missing.
 After the first deploy, create your account:
 
 ```bash
-cd ~/life-dash && docker compose exec life-dash node server/cli.mjs add yourname
+cd ~/life-dash/app/deploy && docker compose exec life-dash node server/cli.mjs add yourname
 ```
 
-The container listens on `127.0.0.1:8080` only. Put a reverse proxy with HTTPS in front of it (see the nginx example above). To use another port, set `LIFE_DASH_PORT` in the shell or in a `.env` file next to `compose.yml`.
+The container listens on `127.0.0.1:8080` only. Put a reverse proxy with HTTPS in front of it (see the nginx example above). To use another port, set `LIFE_DASH_PORT` in `life-dash.env` and update `PUBLIC_URL` to match.
 
-To run commands by hand, use `cd ~/life-dash`, then `docker compose ps`, `docker compose logs -f` or `docker compose pull && docker compose up -d`. Run by hand, these use the `latest` tag.
+To run commands by hand, use `cd ~/life-dash/app/deploy`, then `docker compose ps`, `docker compose logs -f` or `docker compose up -d --build`.
 
-**Backups:** the database is a single SQLite file in the `life-dash-data` volume. For example:
+**Rolling back:** the previous version is in `~/life-dash/app.old`. Run these one after the other:
+
+```bash
+cd ~/life-dash && mv app app.bad && mv app.old app
+```
+
+```bash
+cd app/deploy && docker compose up -d --build
+```
+
+**Backups:** the database is a single SQLite file in the `life-dash-data` volume. For example, from `~/life-dash/app/deploy`:
 
 ```bash
 docker compose exec life-dash node -e "new (require('node:sqlite').DatabaseSync)('/data/life-dash.db').exec(\"VACUUM INTO '/data/backup.db'\")"

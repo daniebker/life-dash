@@ -3,7 +3,8 @@
 # Server layout (created by the deploy workflow):
 #   <DEPLOY_PATH>/life-dash.env      your settings (see .env.example); never touched by a deploy
 #   <DEPLOY_PATH>/app/               the source of the deployed commit; this file is app/deploy/compose.yml
-#   <DEPLOY_PATH>/app/deploy/.env    written by the deploy; points LIFE_DASH_ENV_FILE at ../../life-dash.env
+#   <DEPLOY_PATH>/app/deploy/.env    written by the deploy: LIFE_DASH_ENV_FILE=../../life-dash.env, plus
+#                                    LIFE_DASH_PORT copied from life-dash.env if you set it there
 #
 # By hand, from <DEPLOY_PATH>/app/deploy: docker compose up -d --build | logs -f | ps
 name: life-dash

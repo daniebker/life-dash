@@ -1,6 +1,6 @@
 # Run Life Dash from this checkout: docker compose up -d --build
 # Settings come from .env (copy .env.example). HOST, PORT and DB_PATH are fixed below for the container.
-# The server uses deploy/compose.yml instead, which runs the published image from ghcr.io.
+# The deploy workflow uses deploy/compose.yml on the server, which builds the same Dockerfile.
 name: life-dash
 
 services:

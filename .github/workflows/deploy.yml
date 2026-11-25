@@ -103,6 +103,7 @@ jobs:
           git archive --format=tar HEAD \
             | ssh target "rm -rf '$DEPLOY_PATH/app.new' && mkdir -p '$DEPLOY_PATH/app.new' && tar -x -C '$DEPLOY_PATH/app.new' \
                 && printf 'LIFE_DASH_ENV_FILE=../../life-dash.env\n' > '$DEPLOY_PATH/app.new/deploy/.env' \
+                && { grep '^LIFE_DASH_PORT=' '$DEPLOY_PATH/life-dash.env' >> '$DEPLOY_PATH/app.new/deploy/.env' || true; } \
                 && echo '$GITHUB_SHA' > '$DEPLOY_PATH/app.new/REVISION'"
 
       - name: Build and start
