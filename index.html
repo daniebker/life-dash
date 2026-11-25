@@ -626,10 +626,10 @@ document.addEventListener("drop", e => { if (e.dataTransfer?.files?.length) inge
   restore();
   try { const r = +localStorage.getItem("lifedash.range"); if ([7, 14, 30].includes(r)) { RANGE = r; $("#range").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", +x.dataset.r === r)); } } catch (e) {}
   if (!FILES.length) {
-    // Optional: files listed in data/manifest.json next to this page are loaded on first visit.
+    // Optional: files listed in data/manifest.json next to this page are loaded on first visit (names ending .b64 are base64-decoded).
     try {
       const man = await (await fetch("data/manifest.json")).json();
-      for (const n of man) { const r = await fetch("data/" + n); if (r.ok) await addFile(n, await r.arrayBuffer(), Date.now()); }
+      for (const n of man) { const r = await fetch("data/" + n); if (r.ok) await addFile(n.replace(/\.b64$/, ""), n.endsWith(".b64") ? b64dec((await r.text()).trim()) : await r.arrayBuffer(), Date.now()); }
       save();
     } catch (e) { /* no bundled data */ }
   }

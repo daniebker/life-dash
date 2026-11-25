@@ -56,4 +56,6 @@ When served over HTTP (for example `python3 -m http.server`), the page loads the
 ["activities.txt", "log.csv", "checkins.csv", "habits.dat"]
 ```
 
+Binary files can also be listed base64-encoded with a `.b64` suffix (e.g. `habits.dat.b64`).
+
 `data/` is git-ignored so personal data stays out of the repository.
