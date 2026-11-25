@@ -1,12 +1,21 @@
-# Runs Life Dash on the server. The deploy workflow copies this file to DEPLOY_PATH and starts the
-# image it just built, by digest. To run it by hand: docker compose up -d (uses the "latest" tag).
+# Runs Life Dash on the server, building the image from this repository's Dockerfile.
 #
-# Put settings in life-dash.env next to this file (see .env.example). HOST and DB_PATH are set here.
+# Server layout (created by the deploy workflow):
+#   <DEPLOY_PATH>/life-dash.env      your settings (see .env.example); never touched by a deploy
+#   <DEPLOY_PATH>/app/               the source of the deployed commit; this file is app/deploy/compose.yml
+#   <DEPLOY_PATH>/app/deploy/.env    written by the deploy; points LIFE_DASH_ENV_FILE at ../../life-dash.env
+#
+# By hand, from <DEPLOY_PATH>/app/deploy: docker compose up -d --build | logs -f | ps
+name: life-dash
+
 services:
   life-dash:
-    image: ${LIFE_DASH_IMAGE:-ghcr.io/daniebker/life-dash:latest}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: life-dash:local
     restart: unless-stopped
-    env_file: life-dash.env
+    env_file: ${LIFE_DASH_ENV_FILE:-life-dash.env}
     environment:
       HOST: 0.0.0.0
       PORT: "8080"

@@ -1,17 +1,16 @@
 name: Deploy
 
-# Tests, builds a Docker image, pushes it to GitHub Container Registry (ghcr.io), then starts it
-# on your server with Docker Compose over SSH.
+# Tests, checks that the Docker image builds and starts, then sends the source to your server over SSH
+# and builds and starts it there with Docker Compose (deploy/compose.yml).
 #
 # Uses the repository's "prod" environment:
 #   VPS_HOST, VPS_PORT, VPS_USER   server address and SSH user (a user allowed to run docker)
 #   VPS_SSH_KEY                    private SSH key for VPS_USER
-#   GHCR_PAT                       token with read:packages, used by the server to pull the image
 #   VPS_KNOWN_HOSTS                (optional, recommended) output of `ssh-keyscan -p <port> <host>`;
 #                                  without it the host key is fetched at deploy time and trusted as-is
 #   DEPLOY_PATH                    (optional variable) folder on the server, default ~/life-dash
 #
-# The server keeps life-dash.env and the life-dash-data volume; a deploy never touches them.
+# The server keeps <DEPLOY_PATH>/life-dash.env and the life-dash-data volume; a deploy never touches them.
 
 on:
   push:
@@ -38,29 +37,11 @@ jobs:
   image:
     needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      image: ${{ steps.name.outputs.image }}
-      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Image name
-        id: name
-        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build for smoke test
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          load: true
-          tags: life-dash:smoke
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Build
+        run: docker build -t life-dash:smoke .
 
       - name: Smoke test
         run: |
@@ -74,42 +55,15 @@ jobs:
           docker logs smoke
           docker rm -f smoke
 
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/metadata-action@v5
-        id: meta
-        with:
-          images: ${{ steps.name.outputs.image }}
-          tags: |
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Push
-        id: push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-
   deploy:
     needs: image
     runs-on: ubuntu-latest
     environment: prod
-    permissions:
-      contents: read
     env:
       VPS_HOST: ${{ secrets.VPS_HOST || vars.VPS_HOST }}
       VPS_PORT: ${{ secrets.VPS_PORT || vars.VPS_PORT || '22' }}
       VPS_USER: ${{ secrets.VPS_USER || vars.VPS_USER }}
       DEPLOY_PATH: ${{ vars.DEPLOY_PATH || 'life-dash' }}
-      IMAGE_REF: ${{ needs.image.outputs.image }}@${{ needs.image.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -117,9 +71,8 @@ jobs:
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
-          GHCR_PAT: ${{ secrets.GHCR_PAT }}
         run: |
-          for v in VPS_HOST VPS_USER VPS_SSH_KEY GHCR_PAT; do
+          for v in VPS_HOST VPS_USER VPS_SSH_KEY; do
             [ -n "${!v}" ] || { echo "::error::$v is not set in the prod environment"; exit 1; }
           done
           install -m 700 -d ~/.ssh
@@ -142,33 +95,33 @@ jobs:
             echo "  BatchMode yes"
           } > ~/.ssh/config
 
-      - name: Upload compose file
+      - name: Upload source
         run: |
           ssh target "mkdir -p '$DEPLOY_PATH' && test -f '$DEPLOY_PATH/life-dash.env'" \
             || { echo "::error::$DEPLOY_PATH/life-dash.env is missing on the server. Create it from .env.example first."; exit 1; }
-          scp deploy/compose.yml "target:$DEPLOY_PATH/compose.yml"
+          # tracked files of this commit only, unpacked next to the running copy
+          git archive --format=tar HEAD \
+            | ssh target "rm -rf '$DEPLOY_PATH/app.new' && mkdir -p '$DEPLOY_PATH/app.new' && tar -x -C '$DEPLOY_PATH/app.new' \
+                && printf 'LIFE_DASH_ENV_FILE=../../life-dash.env\n' > '$DEPLOY_PATH/app.new/deploy/.env' \
+                && echo '$GITHUB_SHA' > '$DEPLOY_PATH/app.new/REVISION'"
 
-      - name: Pull and start
-        env:
-          GHCR_PAT: ${{ secrets.GHCR_PAT }}
-          GHCR_USER: ${{ github.repository_owner }}
+      - name: Build and start
         run: |
-          # The token is piped over SSH (never on a command line) and the server logs out again after pulling.
-          printf '%s' "$GHCR_PAT" | ssh target "docker login ghcr.io -u '$GHCR_USER' --password-stdin >/dev/null"
-          ssh target "cd '$DEPLOY_PATH' && export LIFE_DASH_IMAGE='$IMAGE_REF' \
-            && (docker compose pull; s=\$?; docker logout ghcr.io >/dev/null; exit \$s) \
-            && docker compose up -d --remove-orphans \
-            && docker image prune -f >/dev/null"
-          echo "Deployed $IMAGE_REF"
+          # Build from the new source first; the running container keeps serving until the build succeeds.
+          ssh target "cd '$DEPLOY_PATH/app.new/deploy' && docker compose build --pull"
+          ssh target "cd '$DEPLOY_PATH' && rm -rf app.old && { [ ! -d app ] || mv app app.old; } && mv app.new app \
+            && cd app/deploy && docker compose up -d --remove-orphans && docker image prune -f >/dev/null"
+          echo "Deployed $GITHUB_SHA"
 
       - name: Wait for healthy
         run: |
           for i in $(seq 1 30); do
-            state=$(ssh target "cd '$DEPLOY_PATH' && docker inspect --format '{{.State.Health.Status}}' \$(LIFE_DASH_IMAGE='$IMAGE_REF' docker compose ps -q life-dash)")
+            state=$(ssh target "cd '$DEPLOY_PATH/app/deploy' && docker inspect --format '{{.State.Health.Status}}' \$(docker compose ps -q life-dash)")
             echo "health: $state"
             [ "$state" = healthy ] && exit 0
             [ "$state" = unhealthy ] && break
             sleep 3
           done
-          ssh target "cd '$DEPLOY_PATH' && LIFE_DASH_IMAGE='$IMAGE_REF' docker compose logs --tail 50 life-dash"
+          ssh target "cd '$DEPLOY_PATH/app/deploy' && docker compose logs --tail 50 life-dash"
+          echo "::error::The new version didn't become healthy. The previous source is in $DEPLOY_PATH/app.old."
           exit 1
