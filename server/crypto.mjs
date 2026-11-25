@@ -21,6 +21,25 @@ export async function verifyPassword(password, stored) {
   return timingSafeEqual(got, expected) && Boolean(stored);
 }
 
+// Readable one-time code, e.g. "K7QX-M2PD" (no 0/O/1/I to avoid misreading)
+export function setupCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789", b = randomBytes(8);
+  const s = [...b].map(x => alphabet[x % alphabet.length]).join("");
+  return `${s.slice(0, 4)}-${s.slice(4)}`;
+}
+const normCode = c => String(c || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+export const codesMatch = (a, b) => {
+  const x = Buffer.from(normCode(a)), y = Buffer.from(normCode(b));
+  return x.length > 0 && x.length === y.length && timingSafeEqual(x, y);
+};
+
+export const USERNAME_RE = /^[A-Za-z0-9._@-]{1,64}$/;
+export function passwordProblem(p) {
+  if (typeof p !== "string" || p.length < 10) return "Use a password of at least 10 characters.";
+  if (p.length > 1024) return "That password is too long.";
+  return null;
+}
+
 export const randomToken = (bytes = 32) => randomBytes(bytes).toString("base64url");
 export const sha256 = data => createHash("sha256").update(data).digest("hex");
 

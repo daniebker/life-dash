@@ -7,7 +7,7 @@
 import { createInterface } from "node:readline";
 import { loadConfig } from "./config.mjs";
 import { openDb, now } from "./db.mjs";
-import { hashPassword } from "./crypto.mjs";
+import { hashPassword, passwordProblem, USERNAME_RE } from "./crypto.mjs";
 
 const [cmd, name] = process.argv.slice(2);
 const db = openDb(loadConfig().dbPath);
@@ -22,7 +22,8 @@ function askHidden(prompt) {
 }
 async function newPassword() {
   const p1 = await askHidden("Password: ");
-  if (p1.length < 10) { console.error("Use at least 10 characters."); process.exit(1); }
+  const problem = passwordProblem(p1);
+  if (problem) { console.error(problem); process.exit(1); }
   if (!process.env.LIFE_DASH_PASSWORD && p1 !== await askHidden("Repeat password: ")) { console.error("Passwords don't match."); process.exit(1); }
   return hashPassword(p1);
 }
@@ -31,6 +32,7 @@ const find = () => db.prepare("SELECT id FROM users WHERE username = ?").get(nam
 
 if (cmd === "add") {
   need();
+  if (!USERNAME_RE.test(name)) { console.error("Use a username of up to 64 letters, numbers, dots, dashes, underscores or @."); process.exit(1); }
   if (db.prepare("SELECT 1 FROM users WHERE username = ?").get(name)) { console.error(`${name} already exists.`); process.exit(1); }
   db.prepare("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)").run(name, await newPassword(), now());
   console.log(`Created ${name}.`);

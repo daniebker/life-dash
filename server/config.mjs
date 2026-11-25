@@ -17,6 +17,7 @@ export function loadConfig(env = process.env) {
     trustProxy: env.TRUST_PROXY === "true",
     sessionDays: int(env.SESSION_DAYS, 30),
     maxUploadBytes: int(env.MAX_UPLOAD_MB, 20) * 1024 * 1024,
+    setupCode: env.SETUP_CODE || "",
     oura: {
       clientId: env.OURA_CLIENT_ID || "",
       clientSecret: env.OURA_CLIENT_SECRET || "",

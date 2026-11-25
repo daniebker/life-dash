@@ -2,8 +2,8 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ROOT } from "./config.mjs";
-import { openDb, now } from "./db.mjs";
-import { verifyPassword, randomToken, sha256, makeBox } from "./crypto.mjs";
+import { openDb, now, tx } from "./db.mjs";
+import { verifyPassword, hashPassword, randomToken, sha256, makeBox, setupCode as newSetupCode, codesMatch, passwordProblem, USERNAME_RE } from "./crypto.mjs";
 import { ingestUpload, userData, UploadError } from "./ingest.mjs";
 import { createOura } from "./oura.mjs";
 
@@ -17,7 +17,29 @@ export function createApp(cfg, { log = console } = {}) {
   const db = openDb(cfg.dbPath);
   const box = makeBox(cfg.secretKey);
   const oura = createOura({ db, cfg, box, log });
-  const failures = new Map(); // ip -> { n, until } for login throttling
+  const failures = new Map(); // ip -> { n, until } for login and setup throttling
+
+  /* First-run setup: while there are no users, the first visitor can create one by entering the setup code,
+     which is printed in the server log (or set with SETUP_CODE). */
+  let setupCode = cfg.setupCode || null;
+  const usersExist = () => Boolean(db.prepare("SELECT 1 FROM users LIMIT 1").get());
+  function currentSetupCode() {
+    if (!setupCode) setupCode = newSetupCode();
+    return setupCode;
+  }
+  function announceSetup() {
+    if (usersExist()) return;
+    const code = currentSetupCode();
+    log.info?.(`No users yet. Open ${cfg.publicUrl} to create your account${cfg.setupCode ? " with the SETUP_CODE you configured." : ` with setup code: ${code}`}`);
+  }
+  function throttled(ip) { const f = failures.get(ip); return f && f.until > Date.now(); }
+  function fail(ip) { const n = (failures.get(ip)?.n || 0) + 1; failures.set(ip, { n, until: n >= 5 ? Date.now() + 15 * 60 * 1000 : 0 }); }
+  function startSession(res, userId) {
+    const token = randomToken();
+    db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(now());
+    db.prepare("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)").run(sha256(token), userId, now(), now() + cfg.sessionDays * 86400);
+    setCookie(res, token, cfg.sessionDays * 86400);
+  }
 
   /* ---------- helpers ---------- */
   const send = (res, status, body, headers = {}) => {
@@ -59,22 +81,37 @@ export function createApp(cfg, { log = console } = {}) {
   /* ---------- routes ---------- */
   const routes = {
     "POST /api/login": async (req, res) => {
-      const ip = clientIp(req), f = failures.get(ip);
-      if (f && f.until > Date.now()) throw new HttpError(429, "Too many failed sign-ins. Try again in a few minutes.");
+      const ip = clientIp(req);
+      if (throttled(ip)) throw new HttpError(429, "Too many failed sign-ins. Try again in a few minutes.");
       const { username = "", password = "" } = await readJson(req);
       const user = db.prepare("SELECT id, username, password_hash FROM users WHERE username = ?").get(String(username));
       const ok = await verifyPassword(String(password), user?.password_hash);
-      if (!ok) {
-        const n = (f?.n || 0) + 1;
-        failures.set(ip, { n, until: n >= 5 ? Date.now() + 15 * 60 * 1000 : 0 });
-        throw new HttpError(401, "Username or password is incorrect.");
-      }
+      if (!ok) { fail(ip); throw new HttpError(401, "Username or password is incorrect."); }
       failures.delete(ip);
-      const token = randomToken();
-      db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(now());
-      db.prepare("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)").run(sha256(token), user.id, now(), now() + cfg.sessionDays * 86400);
-      setCookie(res, token, cfg.sessionDays * 86400);
+      startSession(res, user.id);
       send(res, 200, { user: { username: user.username } });
+    },
+
+    "POST /api/setup": async (req, res) => {
+      const ip = clientIp(req);
+      if (usersExist()) throw new HttpError(409, "Setup is already done. Sign in instead.");
+      if (throttled(ip)) throw new HttpError(429, "Too many wrong setup codes. Try again in a few minutes.");
+      const { username = "", password = "", code = "" } = await readJson(req);
+      if (!codesMatch(code, currentSetupCode())) { fail(ip); throw new HttpError(403, "That setup code isn't right. It's printed in the server log."); }
+      if (!USERNAME_RE.test(String(username))) throw new HttpError(400, "Use a username of up to 64 letters, numbers, dots, dashes, underscores or @.");
+      const problem = passwordProblem(password);
+      if (problem) throw new HttpError(400, problem);
+      const hash = await hashPassword(password);
+      const userId = tx(db, () => {
+        if (usersExist()) return null; // someone else finished setup first
+        return Number(db.prepare("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)").run(String(username), hash, now()).lastInsertRowid);
+      });
+      if (!userId) throw new HttpError(409, "Setup is already done. Sign in instead.");
+      failures.delete(ip);
+      setupCode = cfg.setupCode || null; // a generated code is one-time
+      log.info?.(`First user ${username} created through setup.`);
+      startSession(res, userId);
+      send(res, 201, { user: { username: String(username) } });
     },
 
     "POST /api/logout": async (req, res) => {
@@ -85,7 +122,12 @@ export function createApp(cfg, { log = console } = {}) {
     },
 
     "GET /api/me": async (req, res) => {
-      const u = requireUser(req);
+      const u = sessionUser(req);
+      if (!u) {
+        const setupRequired = !usersExist();
+        if (setupRequired && !setupCode) announceSetup(); // users were removed while running: issue a new code
+        return send(res, 401, { error: "Sign in to continue.", setupRequired });
+      }
       send(res, 200, { user: { username: u.username }, oura: oura.status(u.id) });
     },
 
@@ -176,7 +218,7 @@ export function createApp(cfg, { log = console } = {}) {
   return {
     server, db, oura,
     listen(port = cfg.port, host = cfg.host) {
-      return new Promise(r => server.listen(port, host, () => { oura.start(); r(server.address()); }));
+      return new Promise(r => server.listen(port, host, () => { oura.start(); announceSetup(); r(server.address()); }));
     },
     async close() { oura.stop(); await new Promise(r => server.close(r)); db.close(); },
   };

@@ -76,11 +76,20 @@ Requires Node.js 22.13 or newer, or Docker (see below). It has no npm dependenci
 
 ```bash
 cp .env.example .env        # then set SECRET_KEY (openssl rand -hex 32) and the Oura values
-npm run user -- add yourname
-npm start
+npm start                   # then open the page and create your account (or: npm run user -- add yourname)
 ```
 
-Open `PUBLIC_URL` (default http://localhost:8080) and sign in. Other user commands: `npm run user -- passwd yourname`, `npm run user -- list`, `npm run user -- remove yourname`.
+Open `PUBLIC_URL` (default http://localhost:8080) and sign in.
+
+**First run:** if there are no accounts yet, the first visit shows **Create your account** instead of the sign-in form. It asks for a one-time setup code, which the server prints in its log at startup:
+
+```
+No users yet. Open https://dash.example.com to create your account with setup code: K7QX-M2PD
+```
+
+The code stops anyone else who finds the server first from claiming it. To choose the code yourself, set `SETUP_CODE` in the env file; it is then not printed. Once an account exists, the setup screen and code are gone for good. If you prefer, you can still create accounts from the command line, as above.
+
+Other user commands: `npm run user -- passwd yourname`, `npm run user -- list`, `npm run user -- remove yourname`.
 
 ### Uploads and de-duplication
 
@@ -152,11 +161,7 @@ cp .env.example .env        # then set SECRET_KEY (openssl rand -hex 32) and, op
 docker compose up -d --build
 ```
 
-```bash
-docker compose exec life-dash node server/cli.mjs add yourname
-```
-
-Then open http://localhost:8080. Compose refuses to start until `SECRET_KEY` is set. To use another port, set `LIFE_DASH_PORT` in `.env`; if you do, also update `PUBLIC_URL`.
+Then open http://localhost:8080 and create your account. The setup code is in `docker compose logs life-dash`; alternatively, use `docker compose exec life-dash node server/cli.mjs add yourname`. Compose refuses to start until `SECRET_KEY` is set. To use another port, set `LIFE_DASH_PORT` in `.env`; if you do, also update `PUBLIC_URL`.
 
 Other commands:
 - `docker compose logs -f`: follow the server log
@@ -221,10 +226,10 @@ Copy this repository's `.env.example` to `~/life-dash/life-dash.env` on the serv
 
 The first deploy fails with a clear message if this file is missing.
 
-After the first deploy, create your account:
+After the first deploy, open your `PUBLIC_URL` and create your account with the setup code from the log:
 
 ```bash
-cd ~/life-dash/app/deploy && docker compose exec life-dash node server/cli.mjs add yourname
+cd ~/life-dash/app/deploy && docker compose logs life-dash | grep "setup code"
 ```
 
 The container listens on `127.0.0.1:8080` only. Put a reverse proxy with HTTPS in front of it (see the nginx example above). To use another port, set `LIFE_DASH_PORT` in `life-dash.env` and update `PUBLIC_URL` to match.
