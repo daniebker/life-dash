@@ -6,6 +6,7 @@ import { openDb, now, tx } from "./db.mjs";
 import { verifyPassword, hashPassword, randomToken, sha256, makeBox, codesMatch, passwordProblem, USERNAME_RE } from "./crypto.mjs";
 import { ingestUpload, userData, UploadError } from "./ingest.mjs";
 import { createOura } from "./oura.mjs";
+import { createMindwtr, MindwtrError } from "./mindwtr.mjs";
 
 const COOKIE = "ld_session";
 const STATIC = { "/": ["index.html", "text/html; charset=utf-8"], "/index.html": ["index.html", "text/html; charset=utf-8"], "/parsers.js": ["parsers.js", "text/javascript; charset=utf-8"] };
@@ -17,6 +18,7 @@ export function createApp(cfg, { log = console } = {}) {
   const db = openDb(cfg.dbPath);
   const box = makeBox(cfg.secretKey);
   const oura = createOura({ db, cfg, box, log });
+  const mindwtr = createMindwtr({ db, cfg, box, log });
   const failures = new Map(); // ip -> { n, until } for login and setup throttling
 
   /* First-run setup: while there are no users, the first visitor can create one.
@@ -119,7 +121,7 @@ export function createApp(cfg, { log = console } = {}) {
         const setupRequired = !usersExist();
         return send(res, 401, { error: "Sign in to continue.", setupRequired, setupCodeRequired: setupRequired && Boolean(cfg.setupCode) });
       }
-      send(res, 200, { user: { username: u.username }, oura: oura.status(u.id) });
+      send(res, 200, { user: { username: u.username }, oura: oura.status(u.id), mindwtr: mindwtr.status(u.id) });
     },
 
     "GET /api/data": async (req, res) => send(res, 200, userData(db, requireUser(req).id)),
@@ -174,6 +176,32 @@ export function createApp(cfg, { log = console } = {}) {
       send(res, r.error ? 502 : 200, { ...r, oura: oura.status(u.id) });
     },
 
+    // Body: { url, username, password }. Fetches data.json once; the connection is saved only if that works.
+    "POST /api/mindwtr/connect": async (req, res) => {
+      const u = requireUser(req);
+      const { url = "", username = "", password = "" } = await readJson(req);
+      try {
+        const r = await mindwtr.connect(u.id, { url: String(url), username: String(username).trim(), password: String(password) });
+        send(res, 200, { ...r, mindwtr: mindwtr.status(u.id) });
+      } catch (e) {
+        if (e instanceof MindwtrError) throw new HttpError(422, e.message);
+        throw e;
+      }
+    },
+
+    "POST /api/mindwtr/sync": async (req, res) => {
+      const u = requireUser(req);
+      if (!mindwtr.status(u.id).connected) throw new HttpError(409, "Connect to Mindwtr's WebDAV folder first.");
+      const r = await mindwtr.syncUser(u.id);
+      send(res, r.error ? 502 : 200, { ...r, mindwtr: mindwtr.status(u.id) });
+    },
+
+    "POST /api/mindwtr/disconnect": async (req, res) => {
+      const u = requireUser(req);
+      mindwtr.disconnect(u.id);
+      send(res, 200, { mindwtr: mindwtr.status(u.id) });
+    },
+
     "POST /api/oura/disconnect": async (req, res) => {
       const u = requireUser(req);
       oura.disconnect(u.id);
@@ -207,10 +235,10 @@ export function createApp(cfg, { log = console } = {}) {
 
   const server = createServer(handle);
   return {
-    server, db, oura,
+    server, db, oura, mindwtr,
     listen(port = cfg.port, host = cfg.host) {
-      return new Promise(r => server.listen(port, host, () => { oura.start(); announceSetup(); r(server.address()); }));
+      return new Promise(r => server.listen(port, host, () => { oura.start(); mindwtr.start(); announceSetup(); r(server.address()); }));
     },
-    async close() { oura.stop(); await new Promise(r => server.close(r)); db.close(); },
+    async close() { oura.stop(); mindwtr.stop(); await new Promise(r => server.close(r)); db.close(); },
   };
 }

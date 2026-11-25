@@ -119,6 +119,31 @@ const MIGRATIONS = [
     error TEXT
   );
   `,
+  `
+  -- Mindwtr (GTD) records: tasks, projects, sections, areas. One row per record id; data is the record's JSON.
+  CREATE TABLE mindwtr_records (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    collection TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    data TEXT NOT NULL,
+    upload_id INTEGER REFERENCES uploads(id) ON DELETE SET NULL,
+    stored_at INTEGER NOT NULL,
+    UNIQUE (user_id, collection, record_id)
+  );
+  CREATE TABLE mindwtr_connections (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    username TEXT,
+    password TEXT,                 -- encrypted
+    etag TEXT,
+    last_sync_at INTEGER,
+    last_error TEXT,
+    created_at INTEGER NOT NULL
+  );
+  `,
 ];
 
 export function openDb(path) {

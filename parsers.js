@@ -14,14 +14,18 @@
   const wallClock = s => typeof s === "string" ? naive(s.slice(0, 19)) : NaN;
   const toArrayBuffer = b => b instanceof ArrayBuffer ? b : b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
 
-  /* Returns "log" | "checkins" | "habits" | "activities" | "oura" | null */
+  /* Returns "log" | "checkins" | "habits" | "activities" | "oura" | "mindwtr" | null */
   function detect(name, input) {
     const buf = toArrayBuffer(input);
     const head = new Uint8Array(buf.slice(0, 4));
     if (String.fromCharCode(...head) === "HBT1") return "habits";
     const text = new TextDecoder().decode(buf.slice(0, 2000));
     if (/^\s*[{[]/.test(text)) {
-      try { if (ouraCollections(JSON.parse(new TextDecoder().decode(buf)))) return "oura"; } catch (e) { /* not JSON */ }
+      try {
+        const j = JSON.parse(new TextDecoder().decode(buf).replace(/^\uFEFF/, ""));
+        if (isMindwtr(j)) return "mindwtr";
+        if (ouraCollections(j)) return "oura";
+      } catch (e) { /* not JSON */ }
       return null;
     }
     if (/^\s*start_ts\s*,\s*end_ts/i.test(text) || /start\s*,\s*end\s*,\s*activity/i.test(text)) return "log";
@@ -108,8 +112,31 @@
     if (Array.isArray(j.data)) j.data.forEach(r => { const k = classifyOuraRow(r); if (k) { (out[k] ||= []).push(r); n++; } });
     return n ? out : null;
   }
+  /* Mindwtr (GTD app) data.json: { tasks: [], projects: [], sections: [], areas: [], people?: [], settings: {} }.
+     Only tasks, projects, sections and areas are kept; settings are dropped (they can hold API keys). */
+  const MINDWTR_KEYS = ["tasks", "projects", "sections", "areas"];
+  function isMindwtr(j) {
+    return Boolean(j) && typeof j === "object" && !Array.isArray(j) && Array.isArray(j.tasks)
+      && (Array.isArray(j.projects) || Array.isArray(j.areas) || (j.settings && typeof j.settings === "object"));
+  }
+  function parseMindwtr(j) {
+    const out = {};
+    for (const k of MINDWTR_KEYS) out[k] = (Array.isArray(j[k]) ? j[k] : []).filter(r => r && typeof r === "object" && typeof r.id === "string" && r.id);
+    return out;
+  }
+  // The fields the dashboard uses, without deleted records.
+  function slimMindwtr(p) {
+    const live = r => !r.deletedAt && !r.purgedAt;
+    const pick = (r, keys) => { const o = {}; for (const k of keys) if (r[k] != null) o[k] = r[k]; return o; };
+    return {
+      tasks: (p.tasks || []).filter(live).map(r => pick(r, ["id", "title", "status", "projectId", "areaId", "contexts", "tags", "priority", "createdAt", "updatedAt", "completedAt", "dueDate", "startTime"])),
+      projects: (p.projects || []).filter(live).map(r => pick(r, ["id", "title", "status", "areaId", "color", "createdAt", "updatedAt"])),
+      areas: (p.areas || []).filter(live).map(r => pick(r, ["id", "name", "color"])),
+    };
+  }
+
   // stable identity of an Oura record across uploads and syncs
   const ouraKey = r => r.id ? String(r.id) : `${r.day}|${r.bedtime_start || ""}`;
 
-  root.LifeParsers = { DAY, naive, dkey, wallClock, detect, parseCSVLine, parseLog, parseCheckins, parseActivities, parseHabits, OURA_KEYS, classifyOuraRow, ouraCollections, ouraKey };
+  root.LifeParsers = { DAY, naive, dkey, wallClock, detect, parseCSVLine, parseLog, parseCheckins, parseActivities, parseHabits, OURA_KEYS, classifyOuraRow, ouraCollections, ouraKey, MINDWTR_KEYS, isMindwtr, parseMindwtr, slimMindwtr };
 })(globalThis);

@@ -14,6 +14,7 @@ The page detects which mode it's in by checking for the server's `/api/me`.
 - **Where the time went**: total and per-day time for each activity.
 - **Sleep per night**: duration, average bedtime and wake time, 8-hour reference line.
 - **Habits**: heatmap of each habit against its daily target, with days met and current streak.
+- **Tasks** (from Mindwtr): tasks completed per day, open tasks by status, active projects, and recently completed tasks.
 - **Oura**: sleep, readiness and activity scores, daily steps, and a nightly table (asleep vs in bed, efficiency, deep/REM, HRV, lowest heart rate, temperature deviation) next to the sleep you logged.
 - **Mood check-ins** and **mood by activity**: each check-in is matched to the activity running at that moment.
 - **Time log table**: the raw entries for the selected range.
@@ -30,6 +31,7 @@ Files are recognised by their content, not their name. You can add several of th
 | Check-ins | CSV without header: `YYYY-MM-DD HH:MM,Core feeling,Feeling,Sub-feeling` (feeling-wheel style). |
 | Habits | Binary `HBT1` file (see below). |
 | Activities | Plain text, one activity name per line. |
+| Mindwtr | The `data.json` that the Mindwtr GTD app syncs (tasks, projects, sections, areas). Its `settings` are dropped and never stored, because they can contain API keys. Files encrypted by Mindwtr's sync encryption can't be read. |
 | Oura | JSON written by `scripts/oura-sync.mjs`, or a raw Oura API v2 response (`{"data": [...]}`) from `daily_sleep`, `daily_readiness`, `daily_activity` or `sleep`. |
 
 ### `HBT1` habits format
@@ -111,6 +113,20 @@ Each upload reports how many records were new, updated and already stored. Uploa
 After connecting, the server fetches the last 90 days (`OURA_BACKFILL_DAYS`) in the background, then syncs every 60 minutes (`SYNC_INTERVAL_MINUTES`). Each sync refetches from 3 days before the last one, so late-arriving scores are picked up. **Sync now** runs one immediately. Access tokens are refreshed automatically. If Oura revokes access, the panel asks you to reconnect.
 
 Tokens are encrypted in the database with a key derived from `SECRET_KEY`, so keep that value stable and secret. **Disconnect** deletes the tokens but keeps data already synced. To also revoke the app's access, remove it in your Oura account settings.
+
+### Mindwtr (WebDAV)
+
+If Mindwtr syncs to WebDAV (for example Nextcloud), Life Dash can read the same `data.json`:
+
+1. In the Tasks panel, enter the WebDAV folder Mindwtr syncs to, plus your username and password. For Nextcloud, use an app password (Settings → Security). The address looks like `https://cloud.example.com/remote.php/dav/files/you/Mindwtr/`. `data.json` is added for you; you can also give the full address of the file.
+2. Select **Connect Mindwtr**. Life Dash fetches the file straight away and saves the connection only if that works.
+
+After that it re-reads the file in the background on the same schedule as Oura (`SYNC_INTERVAL_MINUTES`). It sends the file's ETag, so an unchanged file isn't downloaded again. Life Dash only reads; it never writes to your WebDAV folder.
+
+- Records are matched by their Mindwtr id. Changed tasks are updated, and tasks deleted in Mindwtr, or gone from the file, disappear from the dashboard.
+- An uploaded `data.json` merges with the same records. An upload never replaces a stored task with an older copy, so uploading an old export can't undo newer changes.
+- The WebDAV password is encrypted in the database like the Oura tokens. **Disconnect** removes it and keeps the tasks.
+- If Mindwtr's sync encryption is on, the file can't be read, and the panel says so.
 
 ### Security
 

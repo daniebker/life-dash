@@ -171,6 +171,19 @@ header.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: end; j
 .octl .state { font-size: 12px; color: var(--ink-2); }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; background: var(--neu); }
 .dot.on { background: var(--good-ink); } .dot.warn { background: var(--neg); }
+/* tasks (Mindwtr) */
+.cols.done .c { background: var(--accent); }
+#tasks { display: grid; gap: 14px; min-width: 0; }
+.tgroup { display: grid; gap: 8px; align-content: start; min-width: 0; }
+.mwform { display: flex; flex-wrap: wrap; gap: 8px; flex-basis: 100%; }
+.mwform input { font: inherit; font-size: 13px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; flex: 1 1 160px; min-width: 0; }
+.mwform input#mwUrl { flex: 3 1 300px; }
+.mwform input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tlist { display: grid; gap: 6px; }
+.trow { display: grid; grid-template-columns: 96px 1fr; gap: 10px; font-size: 13px; align-items: baseline; }
+.trow time { font: 11px var(--f-mono); color: var(--ink-3); }
+.trow .ctx { color: var(--ink-2); }
+@media (max-width: 560px) { .trow { grid-template-columns: 1fr; gap: 0; } }
 /* oura */
 .ochart { position: relative; }
 .ochart svg { display: block; width: 100%; overflow: visible; }
@@ -239,7 +252,7 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
   <div class="drop" id="drop">
     <label class="btn" for="file">Add data files</label>
     <input id="file" type="file" multiple accept=".csv,.txt,.dat,.json,text/csv,text/plain,application/octet-stream">
-    <span class="sub">or drop them here. Time log (.csv), check-ins (.csv), habits (.dat), activity list (.txt) and Oura data (.json) are detected automatically. <span id="storeNote">Files stay in this browser.</span></span>
+    <span class="sub">or drop them here. Time log (.csv), check-ins (.csv), habits (.dat), activity list (.txt), Oura data (.json) and Mindwtr's data.json are detected automatically. <span id="storeNote">Files stay in this browser.</span></span>
     <div class="chips" id="chips"></div>
     <div class="msg" id="upMsg" role="status"></div>
   </div>
@@ -270,6 +283,12 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
     <div class="panel-head"><h2>Oura</h2><span class="sub" id="ouraSub"></span></div>
     <div class="octl" id="ouraCtl" hidden></div>
     <div id="oura"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Tasks</h2><span class="sub" id="tasksSub"></span></div>
+    <div class="octl" id="mwCtl" hidden></div>
+    <div id="tasks"></div>
   </section>
 
   <section class="panel">
@@ -332,7 +351,14 @@ function b64enc(buf) { let s = ""; const b = new Uint8Array(buf); for (let i = 0
 function b64dec(str) { const s = atob(str); const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b.buffer; }
 
 /* ---------- parsers (parsers.js) ---------- */
-const { naive, dkey, wallClock, detect, parseLog, parseCheckins, parseActivities, parseHabits, ouraCollections } = LifeParsers;
+const { naive, dkey, wallClock, detect, parseLog, parseCheckins, parseActivities, parseHabits, ouraCollections, parseMindwtr, slimMindwtr } = LifeParsers;
+// ISO timestamp -> naive local seconds (the dashboard's time base). Date-only values stay on their calendar day.
+function isoToNaive(s) {
+  if (!s) return NaN;
+  if (/^\d{4}-\d\d-\d\d$/.test(s)) return naive(s + " 00:00");
+  const d = new Date(s); const t = d.getTime();
+  return Number.isNaN(t) ? NaN : Math.floor(t / 1000) - d.getTimezoneOffset() * 60;
+}
 
 /* ---------- storage ---------- */
 let SERVER = null; // set in server mode: { me, data, uploads }
@@ -344,6 +370,7 @@ async function addFile(name, buf, lastModified) {
   if (!kind) return { name, ok: false };
   const rec = { name, kind };
   if (kind === "habits") { rec.data = b64enc(buf); rec.year = new Date(lastModified || Date.now()).getFullYear(); }
+  else if (kind === "mindwtr") rec.data = JSON.stringify(parseMindwtr(JSON.parse(new TextDecoder().decode(buf).replace(/^\uFEFF/, "")))); // drop settings (may hold API keys)
   else rec.data = new TextDecoder().decode(buf);
   FILES = FILES.filter(f => !(f.name === name && f.kind === kind));
   if (kind === "habits") FILES = FILES.filter(f => !(f.kind === "habits" && f.year === rec.year));
@@ -355,7 +382,7 @@ async function addFile(name, buf, lastModified) {
 // Both modes produce the same source shape:
 // { log: [{s, e, act}], checkins: [{t, core, mid, leaf}], habits: [{name, target, days}], activities: [name], oura: [{daily_sleep: [], ...}] }
 function sourcesFromFiles() {
-  const src = { log: [], checkins: [], habits: [], activities: [], oura: [] };
+  const src = { log: [], checkins: [], habits: [], activities: [], oura: [], mindwtr: [] };
   for (const f of FILES) {
     try {
       if (f.kind === "log") src.log.push(...parseLog(f.data));
@@ -363,6 +390,7 @@ function sourcesFromFiles() {
       else if (f.kind === "activities") src.activities.push(...parseActivities(f.data));
       else if (f.kind === "habits") src.habits.push(...parseHabits(b64dec(f.data), f.year));
       else if (f.kind === "oura") { const c = ouraCollections(JSON.parse(f.data)); if (c) src.oura.push(c); }
+      else if (f.kind === "mindwtr") src.mindwtr.push(slimMindwtr(parseMindwtr(JSON.parse(f.data.replace(/^\uFEFF/, "")))));
     } catch (e) { console.warn("Could not parse", f.name, e); }
   }
   return src;
@@ -396,8 +424,18 @@ function buildModel(src) {
   checkins.forEach(c => ts.push(c.t));
   habits.forEach(h => Object.keys(h.days).forEach(k => ts.push(naive(k + " 12:00"))));
   Object.keys(oDays).concat([...oSleep.keys()]).forEach(k => ts.push(naive(k + " 12:00")));
+  // Mindwtr: newest copy of each record wins across files
+  const newest = (lists, key) => { const m = new Map(); for (const l of lists) for (const r of l || []) { const p = m.get(r.id); if (!p || String(r.updatedAt || "") >= String(p.updatedAt || "")) m.set(r.id, r); } return m; };
+  const mwSrc = src.mindwtr || [];
+  const mwTasks = [...newest(mwSrc.map(x => x.tasks)).values()].map(t => ({ ...t, doneT: isoToNaive(t.completedAt), dueT: isoToNaive(t.dueDate), createdT: isoToNaive(t.createdAt) }));
+  const mw = { tasks: mwTasks, projects: newest(mwSrc.map(x => x.projects)), areas: newest(mwSrc.map(x => x.areas)), any: mwTasks.length > 0 };
+  // tasks only set the date range when nothing else does (their history can span years): then show the last 90 days of completions
+  if (!ts.length) {
+    const done = mwTasks.map(t => t.doneT).filter(Number.isFinite);
+    if (done.length) { const hi = Math.max(...done); ts.push(Math.max(Math.min(...done), hi - 89 * DAY), hi); }
+  }
   const first = ts.length ? dayStart(Math.min(...ts)) : null, last = ts.length ? dayStart(Math.max(...ts)) : null;
-  M = { log, checkins, habits, acts: [...acts], first, last, oura: { days: oDays, sleep: oSleep, any: Object.keys(oDays).length + oSleep.size > 0 } };
+  M = { log, checkins, habits, acts: [...acts], first, last, mw, oura: { days: oDays, sleep: oSleep, any: Object.keys(oDays).length + oSleep.size > 0 } };
 }
 
 /* ---------- rendering ---------- */
@@ -435,6 +473,7 @@ function render() {
   renderTime(byAct, days);
   renderSleep(sleeps);
   renderOura(days);
+  renderTasks(days);
   renderHabits(days);
   renderMood(chk);
   renderLogTable(lo, hi);
@@ -476,6 +515,13 @@ function renderKPIs(days, byAct, perDayAct, sleeps, chk) {
   if (oR.length) {
     const oS = days.map(d => M.oura.sleep.get(dkey(d))?.asleep).filter(v => v != null);
     tiles.push(["Readiness", Math.round(oR.reduce((a, b) => a + b, 0) / oR.length), "avg Oura score", oS.length ? `${fmtHM(oS.reduce((a, b) => a + b, 0) / oS.length)} actual sleep per night` : `${oR.length} days`]);
+  }
+  if (M.mw.any && days.length) {
+    const lo = days[0], hi = days[days.length - 1] + DAY, today = dayStart(isoToNaive(new Date().toISOString()));
+    const done = M.mw.tasks.filter(t => t.doneT >= lo && t.doneT < hi).length;
+    const next = M.mw.tasks.filter(t => t.status === "next").length;
+    const overdue = M.mw.tasks.filter(t => OPEN_STATUSES.has(t.status) && t.dueT < today).length;
+    tiles.push(["Tasks", done, "completed", `${next} next action${next === 1 ? "" : "s"}${overdue ? ` · ${overdue} overdue` : ""}`]);
   }
   const hs = habitStats(days);
   if (hs.possible) tiles.push(["Habits", Math.round(100 * hs.hit / hs.possible) + "%", "targets met", `${hs.hit} of ${hs.possible} habit-days`]);
@@ -627,6 +673,75 @@ function renderOura(days) {
       nights.map(n => { const o = n.o, t = M.oura.days[n.k]?.temp; return `<tr><td>${fmtDate(n.d)}</td><td class="num">${isNaN(o.start) ? "–" : fmtClock(o.start) + " → " + fmtClock(o.end)}</td><td class="num">${c(o.asleep, fmtHM)}</td><td class="num">${c(o.inBed, fmtHM)}</td><td class="num">${n.logged ? fmtHM(n.logged) : "–"}</td><td class="num">${c(o.eff, v => v + "%")}</td><td class="num">${c(o.deep, fmtHM)}</td><td class="num">${c(o.rem, fmtHM)}</td><td class="num">${c(o.hrv, v => Math.round(v) + " ms")}</td><td class="num">${c(o.low, v => v + " bpm")}</td><td class="num">${c(t, v => (v > 0 ? "+" : "") + v.toFixed(1) + "°")}</td></tr>`; }).join("") +
       `</tbody></table></div><div class="note">“Logged” is the Sleep entry in your time log ending that morning, for comparison with what the ring measured.</div>`;
   }
+  el.innerHTML = html;
+}
+
+const OPEN_STATUSES = new Set(["inbox", "next", "waiting", "someday"]);
+const STATUS_LABELS = [["inbox", "Inbox"], ["next", "Next"], ["waiting", "Waiting"], ["someday", "Someday"]];
+let mwCtlKey = "";
+function renderMwControls() {
+  const ctl = $("#mwCtl");
+  if (!SERVER) { ctl.hidden = true; mwCtlKey = ""; return; }
+  const m = SERVER.me.mindwtr || { connected: false };
+  const key = JSON.stringify([m.connected, m.url, m.syncing, m.lastSyncAt, m.lastError]);
+  if (key === mwCtlKey && ctl.innerHTML) return; // keep typed values and messages
+  mwCtlKey = key; ctl.hidden = false;
+  if (!m.connected) {
+    ctl.innerHTML = `<form class="mwform" id="mwForm">
+        <input id="mwUrl" aria-label="WebDAV address" placeholder="WebDAV folder, e.g. https://cloud.example.com/remote.php/dav/files/you/Mindwtr/" required>
+        <input id="mwUser" aria-label="WebDAV username" placeholder="Username" autocomplete="off">
+        <input id="mwPass" aria-label="WebDAV password" type="password" placeholder="Password or app password" autocomplete="new-password">
+        <button class="ghost primary" type="submit" id="mwBtn">Connect Mindwtr</button>
+      </form>
+      <span class="state">Use the WebDAV folder from Mindwtr's sync settings (data.json is added), or the full address of the file. For Nextcloud, create an app password.</span>
+      <span class="msg" id="mwMsg"></span>`;
+    return;
+  }
+  let where = m.url; try { const u = new URL(m.url); where = u.host + decodeURIComponent(u.pathname); } catch (e) {}
+  const state = m.syncing ? `<span class="dot on"></span>Syncing…`
+    : `<span class="dot ${m.lastError ? "warn" : "on"}"></span>Mindwtr via ${esc(where)} · ${m.lastSyncAt ? "synced " + ago(m.lastSyncAt) : "not synced yet"}${m.lastError ? ` · ${esc(m.lastError)}` : ""}`;
+  ctl.innerHTML = `<button type="button" class="ghost" data-mw="sync"${m.syncing ? " disabled" : ""}>Sync now</button><button type="button" class="ghost" data-mw="disconnect">Disconnect</button><span class="state">${state}</span><span class="msg" id="mwMsg"></span>`;
+}
+function renderTasks(days) {
+  renderMwControls();
+  const el = $("#tasks"), mw = M.mw;
+  if (!mw.any || !days.length) {
+    $("#tasksSub").textContent = "";
+    el.innerHTML = `<div class="empty">${SERVER ? "Connect Mindwtr's WebDAV folder above, or upload its data.json, to see your tasks here." : "Drop Mindwtr's data.json here to see your tasks."}</div>`;
+    return;
+  }
+  const lo = days[0], hi = days[days.length - 1] + DAY;
+  const done = mw.tasks.filter(t => t.doneT >= lo && t.doneT < hi).sort((a, b) => b.doneT - a.doneT);
+  const open = mw.tasks.filter(t => OPEN_STATUSES.has(t.status));
+  const today = dayStart(isoToNaive(new Date().toISOString()));
+  const overdue = open.filter(t => t.dueT < today);
+  $("#tasksSub").textContent = `${done.length} completed in range · ${open.length} open${overdue.length ? ` · ${overdue.length} overdue` : ""}`;
+  const projName = id => mw.projects.get(id)?.title;
+  const step = Math.ceil(days.length / 14);
+
+  // completed per day
+  const perDay = days.map(d => done.filter(t => dayStart(t.doneT) === d));
+  const peak = Math.max(...perDay.map(a => a.length)), top = Math.max(4, Math.ceil(peak / 2) * 2);
+  const grid = [0, top / 2, top].map(v => `<div class="gl" style="bottom:${v / top * 100}%"><span>${v}</span></div>`).join("");
+  const cols = perDay.map((a, i) => `<div class="c" style="height:${a.length / top * 100}%" ${tipAttr(`<b>${a.length} completed</b> · ${fmtDate(days[i])}${a.slice(0, 6).map(t => "<br>✓ " + esc(t.title)).join("")}${a.length > 6 ? `<br>and ${a.length - 6} more` : ""}`)}></div>`).join("");
+  const xl = days.map((d, i) => `<span>${i % step === 0 ? new Date(d * 1000).getUTCDate() : ""}</span>`).join("");
+  let html = `<div class="tgroup"><div class="panel-head"><span class="eyebrow">Completed per day</span><span class="sub">${(done.length / days.length).toFixed(1)} per day</span></div>
+    <div><div class="cols done" style="height:110px">${grid}${cols}</div><div class="xlabels">${xl}</div></div></div>`;
+
+  // open tasks by status | projects
+  const counts = STATUS_LABELS.map(([k, label]) => [label, open.filter(t => t.status === k).length]);
+  const maxC = Math.max(1, ...counts.map(c => c[1]));
+  const statusHtml = `<div class="bars">${counts.map(([label, n]) => `<span class="lab">${label}</span><div class="track" ${tipAttr(`<b>${n}</b> ${label.toLowerCase()} task${n === 1 ? "" : "s"}`)}><div class="fill" style="width:${n / maxC * 100}%;background:var(--accent)"></div></div><span class="val">${n}</span>`).join("")}</div>`;
+  const projects = [...mw.projects.values()].filter(p => p.status === "active").map(p => ({
+    p, open: open.filter(t => t.projectId === p.id).length, done: done.filter(t => t.projectId === p.id).length,
+  })).sort((a, b) => b.done - a.done || b.open - a.open).slice(0, 10);
+  const projHtml = projects.length ? `<div class="tablewrap"><table class="data"><thead><tr><th>Project</th><th>Area</th><th>Open</th><th>Done in range</th></tr></thead><tbody>${projects.map(r =>
+    `<tr><td>${esc(r.p.title)}</td><td>${esc(mw.areas.get(r.p.areaId)?.name || "–")}</td><td class="num">${r.open}</td><td class="num">${r.done}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">No active projects.</div>`;
+  html += `<div class="grid2"><div class="tgroup"><span class="eyebrow">Open by status</span>${statusHtml}</div><div class="tgroup"><span class="eyebrow">Active projects</span>${projHtml}</div></div>`;
+
+  // recently completed
+  if (done.length) html += `<div class="tgroup"><span class="eyebrow">Recently completed</span><div class="tlist">${done.slice(0, 8).map(t =>
+    `<div class="trow"><time>${fmtDay(dayStart(t.doneT))} ${fmtClock(t.doneT)}</time><span>${esc(t.title)}${projName(t.projectId) ? ` <span class="ctx">· ${esc(projName(t.projectId))}</span>` : ""}</span></div>`).join("")}</div></div>`;
   el.innerHTML = html;
 }
 
@@ -838,6 +953,38 @@ document.addEventListener("click", async e => {
   if (m) {
     m.className = "msg" + (r.ok ? " ok" : " err");
     m.textContent = r.ok ? (action === "sync" ? `Synced: ${r.json.added} new, ${r.json.updated} updated.` : "Oura disconnected. Data already synced is kept.") : (r.json?.error || "That didn't work.");
+  }
+});
+document.addEventListener("submit", async e => {
+  if (e.target.id !== "mwForm") return;
+  e.preventDefault();
+  const btn = $("#mwBtn"), msg = $("#mwMsg");
+  btn.disabled = true; msg.className = "msg"; msg.textContent = "Fetching data.json…";
+  try {
+    const r = await api("/api/mindwtr/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: $("#mwUrl").value, username: $("#mwUser").value, password: $("#mwPass").value }) });
+    if (r.status === 401) return showLogin("Your session ended. Sign in again.");
+    if (!r.ok) { msg.className = "msg err"; msg.textContent = r.json?.error || "Couldn't connect."; return; }
+    SERVER.me.mindwtr = r.json.mindwtr;
+    await loadServer(SERVER.me);
+    const m = $("#mwMsg"); if (m) { m.className = "msg ok"; m.textContent = `Connected: ${r.json.mindwtr.tasks} tasks loaded. It syncs in the background from now on.`; }
+  } catch (err) { msg.className = "msg err"; msg.textContent = "Couldn't reach the server."; }
+  finally { const b = $("#mwBtn"); if (b) b.disabled = false; }
+});
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-mw]"); if (!b || !SERVER) return;
+  const action = b.dataset.mw;
+  b.disabled = true;
+  const r = await api(`/api/mindwtr/${action}`, { method: "POST" });
+  if (r.status === 401) return showLogin("Your session ended. Sign in again.");
+  if (r.json?.mindwtr) SERVER.me.mindwtr = r.json.mindwtr;
+  if (action === "sync" && r.ok) await loadServer(SERVER.me); else render();
+  if (document.contains(b)) b.disabled = false;
+  const m = $("#mwMsg");
+  if (m) {
+    m.className = "msg" + (r.ok ? " ok" : " err");
+    m.textContent = !r.ok ? (r.json?.error || r.json?.mindwtr?.lastError || "That didn't work.")
+      : action === "disconnect" ? "Disconnected. Tasks already synced are kept."
+      : r.json.unchanged ? "No changes since the last sync." : `Synced: ${r.json.added} new, ${r.json.updated} updated, ${r.json.removed} removed.`;
   }
 });
 const OURA_RETURN = {

@@ -23,7 +23,7 @@ function prepare(db) {
 }
 
 function counter() {
-  const c = { added: 0, updated: 0, unchanged: 0 };
+  const c = { added: 0, updated: 0, unchanged: 0, removed: 0 };
   c.track = (ins, upd) => { if (ins.changes) c.added++; else if (upd && upd().changes) c.updated++; else c.unchanged++; };
   return c;
 }
@@ -36,6 +36,36 @@ export function storeOura(db, userId, collections, uploadId = null, st = prepare
       if (!r || !r.day) continue;
       const key = P.ouraKey(r), data = JSON.stringify(r);
       c.track(st.ouraIns.run(userId, name, key, r.day, data, uploadId, t), () => st.ouraUpd.run(data, r.day, t, userId, name, key, data));
+    }
+  }
+  return c;
+}
+
+/* Store Mindwtr records. A record is matched by collection + id. With snapshot = true (a WebDAV sync of the
+   live file), the file is the source of truth: changed records are replaced and records missing from it are
+   marked deleted. Uploads (snapshot = false) never replace a stored record with an older copy, so uploading
+   an old export can't undo newer changes. */
+const ts = s => { const t = Date.parse(s); return Number.isFinite(t) ? t : 0; };
+export function storeMindwtr(db, userId, parsed, { uploadId = null, snapshot = false } = {}) {
+  const c = counter(), t = now(), seen = new Set();
+  const get = db.prepare("SELECT updated_at, deleted, data FROM mindwtr_records WHERE user_id = ? AND collection = ? AND record_id = ?");
+  const ins = db.prepare("INSERT INTO mindwtr_records (user_id, collection, record_id, updated_at, deleted, data, upload_id, stored_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  const upd = db.prepare("UPDATE mindwtr_records SET updated_at = ?, deleted = ?, data = ?, stored_at = ? WHERE user_id = ? AND collection = ? AND record_id = ?");
+  for (const k of P.MINDWTR_KEYS) {
+    for (const r of parsed[k] || []) {
+      seen.add(k + "\0" + r.id);
+      const data = JSON.stringify(r), deleted = r.deletedAt || r.purgedAt ? 1 : 0, updatedAt = String(r.updatedAt || "");
+      const ex = get.get(userId, k, r.id);
+      if (!ex) { ins.run(userId, k, r.id, updatedAt, deleted, data, uploadId, t); c.added++; }
+      else if (ex.data === data && ex.deleted === deleted) c.unchanged++;
+      else if (!snapshot && ts(updatedAt) < ts(ex.updated_at)) c.unchanged++; // stored copy is newer
+      else { upd.run(updatedAt, deleted, data, t, userId, k, r.id); c.updated++; }
+    }
+  }
+  if (snapshot) {
+    const markDeleted = db.prepare("UPDATE mindwtr_records SET deleted = 1, stored_at = ? WHERE id = ?");
+    for (const row of db.prepare("SELECT id, collection, record_id FROM mindwtr_records WHERE user_id = ? AND deleted = 0").all(userId)) {
+      if (!seen.has(row.collection + "\0" + row.record_id)) { markDeleted.run(t, row.id); c.removed++; }
     }
   }
   return c;
@@ -58,13 +88,16 @@ export function ingestUpload(db, userId, { filename, body, lastModified, tzOffse
     else if (kind === "activities") parsed = P.parseActivities(text);
     else if (kind === "habits") parsed = P.parseHabits(body, new Date(lastModified || Date.now()).getUTCFullYear());
     else if (kind === "oura") parsed = P.ouraCollections(JSON.parse(text));
+    else if (kind === "mindwtr") parsed = P.parseMindwtr(JSON.parse(text.replace(/^\uFEFF/, "")));
   } catch (e) {
     throw new UploadError(`${filename} looks like a ${kind} file but couldn't be read: ${e.message}`);
   }
 
   return tx(db, () => {
+    // Mindwtr files are stored without their settings, which can contain API keys.
+    const content = kind === "mindwtr" ? Buffer.from(JSON.stringify(parsed)) : body;
     const up = db.prepare("INSERT INTO uploads (user_id, filename, kind, sha256, size, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(userId, filename, kind, hash, body.length, body, now());
+      .run(userId, filename, kind, hash, body.length, content, now());
     const uploadId = Number(up.lastInsertRowid);
     const st = prepare(db);
     let c = counter();
@@ -77,6 +110,7 @@ export function ingestUpload(db, userId, { filename, body, lastModified, tzOffse
         for (const [day, v] of Object.entries(h.days)) c.track(st.dayIns.run(hid, day, v, uploadId), () => st.dayUpd.run(v, hid, day, v));
       }
     } else if (kind === "oura") c = storeOura(db, userId, parsed, uploadId, st);
+    else if (kind === "mindwtr") c = storeMindwtr(db, userId, parsed, { uploadId });
     db.prepare("UPDATE uploads SET added = ?, updated = ?, unchanged = ? WHERE id = ?").run(c.added, c.updated, c.unchanged, uploadId);
     return { duplicate: false, upload: db.prepare("SELECT id, filename, kind, size, created_at, added, updated, unchanged FROM uploads WHERE id = ?").get(uploadId) };
   });
@@ -94,5 +128,7 @@ export function userData(db, userId) {
   });
   const oura = {};
   for (const r of db.prepare("SELECT collection, data FROM oura_records WHERE user_id = ? ORDER BY day").all(userId)) (oura[r.collection] ||= []).push(JSON.parse(r.data));
-  return { log, checkins, habits, activities, oura: Object.keys(oura).length ? [oura] : [] };
+  const mw = {};
+  for (const r of db.prepare("SELECT collection, data FROM mindwtr_records WHERE user_id = ? AND deleted = 0 ORDER BY id").all(userId)) (mw[r.collection] ||= []).push(JSON.parse(r.data));
+  return { log, checkins, habits, activities, oura: Object.keys(oura).length ? [oura] : [], mindwtr: Object.keys(mw).length ? [P.slimMindwtr(mw)] : [] };
 }
